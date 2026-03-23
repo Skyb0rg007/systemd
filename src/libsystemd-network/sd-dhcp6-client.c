@@ -522,6 +522,23 @@ int sd_dhcp6_client_set_send_release(sd_dhcp6_client *client, int enable) {
         return 0;
 }
 
+int sd_dhcp6_client_set_register_addresses(sd_dhcp6_client *client, int enable) {
+        assert_return(client, -EINVAL);
+        assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
+
+        client->register_addresses = enable;
+        return 0;
+}
+
+int sd_dhcp6_client_get_addr_reg_enabled(sd_dhcp6_client *client, int *enabled) {
+        assert_return(client, -EINVAL);
+        assert_return(enabled, -EINVAL);
+
+        *enabled = client->addr_reg_enabled;
+
+        return 0;
+}
+
 int sd_dhcp6_client_get_lease(sd_dhcp6_client *client, sd_dhcp6_lease **ret) {
         assert_return(client, -EINVAL);
 

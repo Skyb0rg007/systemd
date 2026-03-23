@@ -29,6 +29,65 @@
 #include "string-table.h"
 #include "string-util.h"
 
+static void dhcp6_start_addr_reg(Link *link) {
+        assert(link);
+        assert(link->dhcp6_client);
+
+        int addr_reg_enabled;
+        if (sd_dhcp6_client_get_addr_reg_enabled(link->dhcp6_client, &addr_reg_enabled) < 0)
+                return;
+
+        if (!addr_reg_enabled)
+                return;
+
+        log_link_debug(link, "Starting address registration.");
+
+        Address *address;
+        SET_FOREACH(address, link->addresses) {
+                if (address->family != AF_INET6)
+                        continue;
+                if (in6_addr_is_link_local(&address->in_addr.in6))
+                        continue;
+                if (in6_addr_is_null(&address->in_addr.in6))
+                        continue;
+                if (in6_addr_is_multicast(&address->in_addr.in6))
+                        continue;
+                switch (address->source) {
+                case NETWORK_CONFIG_SOURCE_IPV4LL:
+                case NETWORK_CONFIG_SOURCE_DHCP4:
+                        assert_not_reached();
+                        continue;
+                case NETWORK_CONFIG_SOURCE_STATIC:
+                        /* Static */
+                        log_link_debug(link,
+                                        "Registering static address %s (valid %s, preferred %s)",
+                                        IN6_ADDR_TO_STRING(&address->in_addr.in6),
+                                        FORMAT_LIFETIME(address->lifetime_valid_usec),
+                                        FORMAT_LIFETIME(address->lifetime_preferred_usec));
+                        /* TODO */
+                        break;
+                case NETWORK_CONFIG_SOURCE_FOREIGN:
+                case NETWORK_CONFIG_SOURCE_NDISC:
+                case NETWORK_CONFIG_SOURCE_RUNTIME:
+                        /* SLAAC */
+                        log_link_debug(link,
+                                        "Registering SLAAC address %s (valid %s, preferred %s)",
+                                        IN6_ADDR_TO_STRING(&address->in_addr.in6),
+                                        FORMAT_LIFETIME(address->lifetime_valid_usec),
+                                        FORMAT_LIFETIME(address->lifetime_preferred_usec));
+                        /* TODO */
+                        break;
+                case NETWORK_CONFIG_SOURCE_DHCP6:
+                case NETWORK_CONFIG_SOURCE_DHCP_PD:
+                case NETWORK_CONFIG_SOURCE_MODEM_MANAGER:
+                default:
+                        /* DHCPv6 */
+                        continue;
+                }
+        }
+        // TODO
+}
+
 bool link_dhcp6_with_address_enabled(Link *link) {
         if (!link_dhcp6_enabled(link))
                 return false;
@@ -350,6 +409,7 @@ static int dhcp6_lease_ip_acquired(sd_dhcp6_client *client, Link *link) {
                 link_set_state(link, LINK_STATE_CONFIGURING);
 
         link_check_ready(link);
+        dhcp6_start_addr_reg(link);
         return 0;
 }
 
@@ -367,6 +427,7 @@ static int dhcp6_lease_information_acquired(sd_dhcp6_client *client, Link *link)
         unref_and_replace_new_ref(link->dhcp6_lease, lease, sd_dhcp6_lease_ref, sd_dhcp6_lease_unref);
 
         link_dirty(link);
+        dhcp6_start_addr_reg(link);
         return 0;
 }
 
@@ -775,6 +836,12 @@ static int dhcp6_configure(Link *link) {
                 return log_link_debug_errno(link, r,
                                             "DHCPv6 CLIENT: Failed to %s sending release message on stop: %m",
                                             enable_disable(link->network->dhcp6_send_release));
+
+        r = sd_dhcp6_client_set_register_addresses(client, link->network->dhcp6_register_addresses);
+        if (r < 0)
+                return log_link_debug_errno(link, r,
+                                            "DHCPv6 CLIENT: Failed to %s address registration: %m",
+                                            enable_disable(link->network->dhcp6_register_addresses));
 
         link->dhcp6_client = TAKE_PTR(client);
 

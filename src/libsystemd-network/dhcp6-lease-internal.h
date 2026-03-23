@@ -50,6 +50,7 @@ struct sd_dhcp6_lease {
         char *captive_portal;
         struct sd_dhcp6_option **sorted_vendor_options;
         Set *vendor_options;
+        bool addr_reg_enabled;
 };
 
 int dhcp6_lease_set_clientid(sd_dhcp6_lease *lease, const uint8_t *id, size_t len);

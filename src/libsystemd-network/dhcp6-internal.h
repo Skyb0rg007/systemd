@@ -76,6 +76,8 @@ struct sd_dhcp6_client {
         sd_dhcp6_client_callback_t state_callback;
         void *state_userdata;
         bool send_release;
+        bool register_addresses;
+        bool addr_reg_enabled;
 };
 
 int dhcp6_network_bind_udp_socket(int ifindex, const struct in6_addr *address);

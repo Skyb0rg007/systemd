@@ -47,6 +47,8 @@ enum {
 #define DHCP6_REN_MAX_RT                        (600 * USEC_PER_SEC)
 #define DHCP6_REB_TIMEOUT                       (10 * USEC_PER_SEC)
 #define DHCP6_REB_MAX_RT                        (600 * USEC_PER_SEC)
+#define DHCP6_REG_TIMEOUT                       (1 * USEC_PER_SEC)
+#define DHCP6_REG_MAX_RC                        3
 
 typedef enum DHCP6State {
         DHCP6_STATE_STOPPED,
