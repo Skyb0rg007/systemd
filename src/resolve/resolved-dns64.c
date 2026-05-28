@@ -1,12 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-/* DNS64 implementation per RFC 6147 and RFC 6052.
- *
- * When a AAAA query returns no results but DNS64 is enabled on the link with a
- * configured PREF64 prefix, we fire off a secondary A query for the same name.
- * If that succeeds we synthesize AAAA records by embedding the IPv4 address
- * into the NAT64 prefix according to RFC 6052 §2.2.
- */
+/* DNS64 implementation per RFC 6147 and RFC 6052. */
 
 #include <netinet/in.h>
 #include <string.h>
@@ -56,31 +50,25 @@ int dns64_synthesize_aaaa(
         uint8_t addr[16] = {};
         const uint8_t *v4 = (const uint8_t *) &a->s_addr;
 
-        /* Copy the NAT64 prefix bits */
         memcpy(addr, prefix->s6_addr, prefix_length / 8);
 
-        /* Embed the IPv4 address; byte 8 is always zero */
         switch (prefix_length) {
         case 32:
                 addr[4] = v4[0]; addr[5] = v4[1]; addr[6] = v4[2]; addr[7] = v4[3];
                 break;
         case 40:
                 addr[5] = v4[0]; addr[6] = v4[1]; addr[7] = v4[2];
-                /* addr[8] = 0 (the u octet) */
                 addr[9] = v4[3];
                 break;
         case 48:
                 addr[6] = v4[0]; addr[7] = v4[1];
-                /* addr[8] = 0 */
                 addr[9] = v4[2]; addr[10] = v4[3];
                 break;
         case 56:
                 addr[7] = v4[0];
-                /* addr[8] = 0 */
                 addr[9] = v4[1]; addr[10] = v4[2]; addr[11] = v4[3];
                 break;
         case 64:
-                /* addr[8] = 0 */
                 addr[9] = v4[0]; addr[10] = v4[1]; addr[11] = v4[2]; addr[12] = v4[3];
                 break;
         case 96:
@@ -92,8 +80,10 @@ int dns64_synthesize_aaaa(
         return 0;
 }
 
-/* Returns true if the question asks only for AAAA records (not A+AAAA). */
-static bool dns_query_is_aaaa_only(DnsQuery *q) {
+/* Returns true if the question contains a class-IN AAAA key. Combined A+AAAA
+ * questions are accepted — RFC 6147 §5.1 applies to any "AAAA query", not
+ * only AAAA-only queries. */
+static bool dns_query_has_aaaa(DnsQuery *q) {
         DnsQuestion *question;
         DnsResourceKey *k;
 
@@ -101,21 +91,47 @@ static bool dns_query_is_aaaa_only(DnsQuery *q) {
 
         question = q->question_bypass ? q->question_bypass->question : q->question_utf8;
 
-        DNS_QUESTION_FOREACH(k, question) {
-                if (k->type == DNS_TYPE_A)
-                        return false;
-                if (k->type == DNS_TYPE_ANY)
-                        return false;
-        }
-
         DNS_QUESTION_FOREACH(k, question)
-                if (k->type == DNS_TYPE_AAAA)
+                if (k->class == DNS_CLASS_IN && k->type == DNS_TYPE_AAAA)
                         return true;
 
         return false;
 }
 
-/* Returns the PREF64 prefix for the link associated with the query, or NULL. */
+/* RFC 6147 §5.1.4: AAAA records pointing into ::ffff:0:0/96 (IPv4-mapped IPv6
+ * addresses) are not usable by IPv6-only clients and MUST be treated as
+ * though the answer were empty. */
+static bool dns64_aaaa_usable(const DnsResourceRecord *rr) {
+        static const uint8_t v4_mapped_prefix[12] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+        };
+
+        assert(rr);
+
+        if (rr->key->class != DNS_CLASS_IN)
+                return false;
+        if (rr->key->type != DNS_TYPE_AAAA)
+                return false;
+        if (memcmp(rr->aaaa.in6_addr.s6_addr, v4_mapped_prefix, 12) == 0)
+                return false;
+
+        return true;
+}
+
+/* Returns true if q->answer contains at least one usable, non-excluded AAAA RR. */
+static bool dns_query_answer_has_usable_aaaa(DnsQuery *q) {
+        DnsResourceRecord *rr;
+
+        assert(q);
+
+        DNS_ANSWER_FOREACH(rr, q->answer)
+                if (dns64_aaaa_usable(rr))
+                        return true;
+
+        return false;
+}
+
+/* Returns the link with DNS64 enabled for q, or NULL if DNS64 doesn't apply. */
 static Link *dns_query_get_dns64_link(DnsQuery *q) {
         assert(q);
 
@@ -128,7 +144,6 @@ static Link *dns_query_get_dns64_link(DnsQuery *q) {
                 l = hashmap_get(q->manager->links, INT_TO_PTR(q->ifindex));
 
         if (!l) {
-                /* Fall back to the link of the scope that answered (or attempted) the query. */
                 LIST_FOREACH(candidates_by_query, c, q->candidates) {
                         if (c->scope && c->scope->link) {
                                 l = c->scope->link;
@@ -143,36 +158,35 @@ static Link *dns_query_get_dns64_link(DnsQuery *q) {
         return l;
 }
 
-static void on_dns64_a_query_complete(DnsQuery *aux) {
-        DnsQuery *q = ASSERT_PTR(aux->auxiliary_for);
-        _cleanup_(dns_query_freep) DnsQuery *aux_owned = aux;
+/* Build a set of synthesized AAAA RRs from A records in source_answer, using
+ * l's configured PREF64 prefix. Each AAAA RR is named after a class-IN AAAA
+ * key in q's question. Returns 0 on success; *ret_answer may be NULL if no
+ * synthesis was possible. */
+static int dns64_build_synthesized_answer(
+                DnsQuery *q,
+                Link *l,
+                DnsAnswer *source_answer,
+                int ifindex,
+                DnsAnswer **ret_answer) {
 
-        /* Remove the auxiliary query from the parent */
-        assert(q->n_auxiliary_queries > 0);
-        q->n_auxiliary_queries--;
-        LIST_REMOVE(auxiliary_queries, q->auxiliary_queries, aux);
-        aux->auxiliary_for = NULL;
-
-        /* Re-acquire the link to get the prefix */
-        Link *l = dns_query_get_dns64_link(q);
-        if (!l)
-                goto fail;
-
-        if (aux->state != DNS_TRANSACTION_SUCCESS)
-                goto fail;
-
-        /* Build the synthesized AAAA answer from the A records */
         _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
-        DnsQuestion *question = q->question_bypass ? q->question_bypass->question : q->question_utf8;
+        DnsQuestion *question;
         DnsResourceKey *key;
+        int r;
+
+        assert(q);
+        assert(l);
+        assert(ret_answer);
+
+        question = q->question_bypass ? q->question_bypass->question : q->question_utf8;
 
         DNS_QUESTION_FOREACH(key, question) {
-                if (key->type != DNS_TYPE_AAAA)
+                if (key->class != DNS_CLASS_IN || key->type != DNS_TYPE_AAAA)
                         continue;
 
                 DnsResourceRecord *rr;
-                DNS_ANSWER_FOREACH(rr, aux->answer) {
-                        if (rr->key->type != DNS_TYPE_A)
+                DNS_ANSWER_FOREACH(rr, source_answer) {
+                        if (rr->key->class != DNS_CLASS_IN || rr->key->type != DNS_TYPE_A)
                                 continue;
 
                         struct in6_addr synth;
@@ -180,31 +194,58 @@ static void on_dns64_a_query_complete(DnsQuery *aux) {
                                                    &rr->a.in_addr, &synth) < 0)
                                 continue;
 
-                        int r = dns_answer_reserve(&answer, 1);
+                        r = dns_answer_reserve(&answer, 1);
                         if (r < 0)
-                                goto fail;
+                                return r;
 
                         _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *aaaa = NULL;
                         aaaa = dns_resource_record_new_full(DNS_CLASS_IN, DNS_TYPE_AAAA,
                                                             dns_resource_key_name(key));
                         if (!aaaa)
-                                goto fail;
+                                return -ENOMEM;
 
                         aaaa->aaaa.in6_addr = synth;
-                        aaaa->ttl = rr->ttl;
+                        /* RFC 6147 §5.1.7: TTL = min(A TTL, SOA TTL); when SOA
+                         * TTL is unknown use 600s. */
+                        aaaa->ttl = MIN(rr->ttl, (uint32_t) 600);
 
-                        r = dns_answer_add(answer, aaaa, aux->answer_family, DNS_ANSWER_CACHEABLE, NULL);
+                        r = dns_answer_add(answer, aaaa, ifindex, DNS_ANSWER_CACHEABLE, NULL);
                         if (r < 0)
-                                goto fail;
+                                return r;
                 }
         }
+
+        *ret_answer = TAKE_PTR(answer);
+        return 0;
+}
+
+static void on_dns64_a_query_complete(DnsQuery *aux) {
+        DnsQuery *q = ASSERT_PTR(aux->auxiliary_for);
+        _cleanup_(dns_query_freep) DnsQuery *aux_owned = aux;
+        int r;
+
+        assert(q->n_auxiliary_queries > 0);
+        q->n_auxiliary_queries--;
+        LIST_REMOVE(auxiliary_queries, q->auxiliary_queries, aux);
+        aux->auxiliary_for = NULL;
+
+        Link *l = dns_query_get_dns64_link(q);
+        if (!l)
+                goto fail;
+
+        if (aux->state != DNS_TRANSACTION_SUCCESS)
+                goto fail;
+
+        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
+        r = dns64_build_synthesized_answer(q, l, aux->answer, l->ifindex, &answer);
+        if (r < 0)
+                goto fail;
 
         if (dns_answer_isempty(answer))
                 goto fail;
 
-        log_debug("DNS64: synthesized %zu AAAA record(s) for %s from A records",
-                  dns_answer_size(answer),
-                  dns_question_first_name(question) ?: "(unknown)");
+        log_debug("DNS64: synthesized %zu AAAA record(s) from auxiliary A query",
+                  dns_answer_size(answer));
 
         dns_query_reset_answer(q);
         q->answer = TAKE_PTR(answer);
@@ -223,9 +264,13 @@ fail:
 
 /*
  * Called from dns_query_accept() just before dns_query_complete().
- * If applicable, starts a DNS64 A-record lookup and returns > 0 to
- * defer the completion of q.  Returns 0 if DNS64 does not apply and
- * the caller should proceed normally.
+ *
+ * Returns > 0 if a DNS64 auxiliary A query was started — the caller MUST
+ * defer completion. Returns 0 otherwise; the caller proceeds normally.
+ *
+ * When the original query is a combined A+AAAA lookup and the A records are
+ * already in q->answer, this function synthesizes AAAA records in place and
+ * returns 0 (no extra round trip).
  */
 int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
         int r;
@@ -233,59 +278,72 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
         assert(q);
         assert(state);
 
-        /* Only synthesize for pure AAAA queries */
-        if (!dns_query_is_aaaa_only(q))
+        /* RFC 6147 §5.1: only act on class-IN AAAA queries. */
+        if (!dns_query_has_aaaa(q))
                 return 0;
 
-        /* Don't recurse: a DNS64 auxiliary query should not itself trigger DNS64 */
+        /* A DNS64 auxiliary query must not itself trigger DNS64. */
         if (q->auxiliary_for)
                 return 0;
 
-        /* Don't synthesize if explicitly suppressed */
         if (FLAGS_SET(q->flags, SD_RESOLVED_NO_SYNTHESIZE))
                 return 0;
-
-        /* Only trigger on "no results" outcomes */
-        if (!IN_SET(*state,
-                    DNS_TRANSACTION_RCODE_FAILURE,
-                    DNS_TRANSACTION_NO_SERVERS,
-                    DNS_TRANSACTION_TIMEOUT,
-                    DNS_TRANSACTION_ATTEMPTS_MAX_REACHED,
-                    DNS_TRANSACTION_NETWORK_DOWN,
-                    DNS_TRANSACTION_NOT_FOUND,
-                    DNS_TRANSACTION_SUCCESS))
-                return 0;
-
-        /* For SUCCESS state, only redirect if there are no AAAA records in the answer */
-        if (*state == DNS_TRANSACTION_SUCCESS) {
-                DnsQuestion *question = q->question_bypass ? q->question_bypass->question
-                                                           : q->question_utf8;
-                DnsResourceKey *k;
-                bool has_aaaa = false;
-
-                DNS_QUESTION_FOREACH(k, question) {
-                        if (k->type != DNS_TYPE_AAAA)
-                                continue;
-                        DnsResourceRecord *rr;
-                        DNS_ANSWER_FOREACH(rr, q->answer) {
-                                if (rr->key->type == DNS_TYPE_AAAA) {
-                                        has_aaaa = true;
-                                        break;
-                                }
-                        }
-                        if (has_aaaa)
-                                break;
-                }
-
-                if (has_aaaa)
-                        return 0; /* We already have AAAA records, no need for DNS64 */
-        }
 
         Link *l = dns_query_get_dns64_link(q);
         if (!l)
                 return 0;
 
-        /* Build an A-record question for the same name */
+        /* RFC 6147 §5.1.2: NXDOMAIN is returned unchanged — no synthesis. */
+        if (*state == DNS_TRANSACTION_NOT_FOUND)
+                return 0;
+        if (*state == DNS_TRANSACTION_RCODE_FAILURE && q->answer_rcode == DNS_RCODE_NXDOMAIN)
+                return 0;
+
+        /* RFC §5.1.1 + §5.1.4: if any usable (non-::ffff/96) AAAA record is in
+         * the answer, do not synthesize. */
+        if (*state == DNS_TRANSACTION_SUCCESS && dns_query_answer_has_usable_aaaa(q))
+                return 0;
+
+        /* States where the AAAA answer is effectively empty/failed and the
+         * RFC asks us to attempt synthesis. */
+        if (!IN_SET(*state,
+                    DNS_TRANSACTION_SUCCESS,
+                    DNS_TRANSACTION_RCODE_FAILURE,
+                    DNS_TRANSACTION_TIMEOUT,
+                    DNS_TRANSACTION_ATTEMPTS_MAX_REACHED))
+                return 0;
+
+        /* Optimization: combined A+AAAA queries already have the A records.
+         * Synthesize AAAA in place and let dns_query_complete() proceed. */
+        if (*state == DNS_TRANSACTION_SUCCESS) {
+                bool has_a = false;
+                DnsResourceRecord *rr;
+                DNS_ANSWER_FOREACH(rr, q->answer)
+                        if (rr->key->class == DNS_CLASS_IN && rr->key->type == DNS_TYPE_A) {
+                                has_a = true;
+                                break;
+                        }
+
+                if (has_a) {
+                        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
+
+                        r = dns64_build_synthesized_answer(q, l, q->answer, l->ifindex, &answer);
+                        if (r < 0)
+                                return r;
+
+                        if (!dns_answer_isempty(answer)) {
+                                r = dns_answer_extend(&q->answer, answer);
+                                if (r < 0)
+                                        return r;
+
+                                q->answer_query_flags |= SD_RESOLVED_SYNTHETIC;
+                                log_debug("DNS64: synthesized %zu AAAA record(s) inline from A+AAAA answer",
+                                          dns_answer_size(answer));
+                        }
+                        return 0; /* completion proceeds normally */
+                }
+        }
+
         const char *name = dns_question_first_name(
                 q->question_bypass ? q->question_bypass->question : q->question_utf8);
         if (!name)
@@ -296,7 +354,6 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
         if (r < 0)
                 return r;
 
-        /* Flags: no search domains, no synthesize, no CNAME */
         uint64_t flags = q->flags | SD_RESOLVED_NO_SEARCH | SD_RESOLVED_NO_SYNTHESIZE;
 
         _cleanup_(dns_query_freep) DnsQuery *aux = NULL;
@@ -316,7 +373,7 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
 
         TAKE_PTR(aux);
 
-        log_debug("DNS64: started A-record lookup for %s on interface %d", name, l->ifindex);
+        log_debug("DNS64: started auxiliary A-record lookup for %s on interface %d", name, l->ifindex);
 
         return 1; /* completion deferred */
 }
