@@ -242,6 +242,7 @@ DNSConfiguration* dns_configuration_free(DNSConfiguration *c) {
         free(c->mdns_mode_str);
         free(c->resolv_conf_mode_str);
         free(c->delegate);
+        free(c->pref64);
         strv_free(c->negative_trust_anchors);
 
         return mfree(c);
@@ -273,6 +274,7 @@ static int dispatch_dns_configuration(const char *name, sd_json_variant *variant
                 { "resolvConfMode",       SD_JSON_VARIANT_STRING,   sd_json_dispatch_string,      offsetof(DNSConfiguration, resolv_conf_mode_str),   0             },
                 { "scopes",               SD_JSON_VARIANT_ARRAY,    dispatch_dns_scope_array,     offsetof(DNSConfiguration, dns_scopes),             0             },
                 { "delegate",             SD_JSON_VARIANT_STRING,   sd_json_dispatch_string,      offsetof(DNSConfiguration, delegate),               0             },
+                { "pref64",              SD_JSON_VARIANT_STRING,   sd_json_dispatch_string,      offsetof(DNSConfiguration, pref64),                 0             },
                 {},
 
         };

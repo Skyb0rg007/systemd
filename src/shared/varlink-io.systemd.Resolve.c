@@ -287,7 +287,9 @@ SD_VARLINK_DEFINE_STRUCT_TYPE(
                 SD_VARLINK_FIELD_COMMENT("resolv.conf mode, set for global configuration only."),
                 SD_VARLINK_DEFINE_FIELD_BY_TYPE(resolvConfMode, ResolvConfMode, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("Array of current DNS scopes."),
-                SD_VARLINK_DEFINE_FIELD_BY_TYPE(scopes, DNSScope, SD_VARLINK_ARRAY|SD_VARLINK_NULLABLE));
+                SD_VARLINK_DEFINE_FIELD_BY_TYPE(scopes, DNSScope, SD_VARLINK_ARRAY|SD_VARLINK_NULLABLE),
+                SD_VARLINK_FIELD_COMMENT("PREF64/NAT64 prefix configured for DNS64 synthesis on this link, in CIDR notation."),
+                SD_VARLINK_DEFINE_FIELD(pref64, SD_VARLINK_STRING, SD_VARLINK_NULLABLE));
 
 static SD_VARLINK_DEFINE_METHOD(
                 ResolveRecord,

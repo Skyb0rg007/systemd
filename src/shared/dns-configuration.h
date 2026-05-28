@@ -54,6 +54,7 @@ typedef struct DNSConfiguration {
         char *resolv_conf_mode_str;
         char *delegate;
         bool dnssec_supported;
+        char *pref64;
 } DNSConfiguration;
 
 DNSConfiguration* dns_configuration_free(DNSConfiguration *c);

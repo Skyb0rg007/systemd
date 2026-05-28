@@ -46,3 +46,4 @@
 #ResolveUnicastSingleLabel=no
 #StaleRetentionSec=0
 #RefuseRecordTypes=
+#DNS64=yes

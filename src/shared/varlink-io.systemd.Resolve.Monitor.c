@@ -133,6 +133,16 @@ static SD_VARLINK_DEFINE_METHOD_FULL(
                 SD_VARLINK_FIELD_COMMENT("The current global and per-interface DNS configurations"),
                 SD_VARLINK_DEFINE_OUTPUT_BY_TYPE(configuration, DNSConfiguration, SD_VARLINK_ARRAY));
 
+static SD_VARLINK_DEFINE_ERROR(NoSuchLink);
+
+static SD_VARLINK_DEFINE_METHOD(
+                SetLinkDNS64Prefix,
+                VARLINK_DEFINE_POLKIT_INPUT,
+                SD_VARLINK_FIELD_COMMENT("Linux interface index of the link to configure."),
+                SD_VARLINK_DEFINE_INPUT(ifindex, SD_VARLINK_INT, 0),
+                SD_VARLINK_FIELD_COMMENT("PREF64 prefix in CIDR notation (e.g. '64:ff9b::/96'). Pass null or empty to clear."),
+                SD_VARLINK_DEFINE_INPUT(prefix, SD_VARLINK_STRING, SD_VARLINK_NULLABLE));
+
 SD_VARLINK_DEFINE_INTERFACE(
                 io_systemd_Resolve_Monitor,
                 "io.systemd.Resolve.Monitor",
@@ -164,4 +174,8 @@ SD_VARLINK_DEFINE_INTERFACE(
                 SD_VARLINK_SYMBOL_COMMENT("Encapsulates a DNS scope specification."),
                 &vl_type_DNSScope,
                 SD_VARLINK_SYMBOL_COMMENT("Sends the complete global and per-link DNS configurations when any changes are made to them. The current configurations are given immediately when this method is invoked."),
-                &vl_method_SubscribeDNSConfiguration);
+                &vl_method_SubscribeDNSConfiguration,
+                SD_VARLINK_SYMBOL_COMMENT("Sets the PREF64/NAT64 prefix on a network interface for DNS64 synthesis."),
+                &vl_method_SetLinkDNS64Prefix,
+                SD_VARLINK_SYMBOL_COMMENT("The specified network interface does not exist."),
+                &vl_error_NoSuchLink);

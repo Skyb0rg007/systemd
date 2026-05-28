@@ -18,6 +18,7 @@
 #include "resolved-dns-search-domain.h"
 #include "resolved-dns-synthesize.h"
 #include "resolved-dns-transaction.h"
+#include "resolved-dns64.h"
 #include "resolved-etc-hosts.h"
 #include "resolved-hook.h"
 #include "resolved-manager.h"
@@ -454,7 +455,7 @@ static void dns_query_unlink_candidates(DnsQuery *q) {
                 dns_query_candidate_unref(dns_query_candidate_unlink(q->candidates));
 }
 
-static void dns_query_reset_answer(DnsQuery *q) {
+void dns_query_reset_answer(DnsQuery *q) {
         assert(q);
 
         q->answer = dns_answer_unref(q->answer);
@@ -1111,6 +1112,12 @@ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
                 if (r < 0)
                         goto fail;
 
+                r = dns_query_dns64_redirect(q, &state);
+                if (r < 0)
+                        goto fail;
+                if (r > 0)
+                        return; /* DNS64 A-query is pending */
+
                 dns_query_complete(q, state);
                 return;
         }
@@ -1214,6 +1221,12 @@ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
         r = dns_query_synthesize_reply(q, &state);
         if (r < 0)
                 goto fail;
+
+        r = dns_query_dns64_redirect(q, &state);
+        if (r < 0)
+                goto fail;
+        if (r > 0)
+                return; /* DNS64 A-query is pending */
 
         dns_query_complete(q, state);
         return;

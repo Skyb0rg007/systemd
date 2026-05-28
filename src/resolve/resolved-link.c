@@ -8,6 +8,7 @@
 
 #include "alloc-util.h"
 #include "dns-domain.h"
+#include "in-addr-util.h"
 #include "dns-packet.h"
 #include "dns-rr.h"
 #include "env-file.h"
@@ -79,6 +80,7 @@ void link_flush_settings(Link *l) {
         l->mdns_support = RESOLVE_SUPPORT_YES;
         l->dnssec_mode = _DNSSEC_MODE_INVALID;
         l->dns_over_tls_mode = _DNS_OVER_TLS_MODE_INVALID;
+        l->dns64_prefix_set = false;
 
         dns_server_unlink_all(l->dns_servers);
         dns_search_domain_unlink_all(l->search_domains);
@@ -1243,6 +1245,9 @@ static bool link_needs_save(Link *l) {
         if (l->default_route >= 0)
                 return true;
 
+        if (l->dns64_prefix_set)
+                return true;
+
         return false;
 }
 
@@ -1340,6 +1345,9 @@ int link_save_user(Link *l) {
                 fputc('\n', f);
         }
 
+        if (l->dns64_prefix_set)
+                fprintf(f, "PREF64=%s/%u\n", IN6_ADDR_TO_STRING(&l->dns64_prefix), l->dns64_prefix_length);
+
         r = fflush_and_check(f);
         if (r < 0)
                 goto fail;
@@ -1368,7 +1376,8 @@ int link_load_user(Link *l) {
                 *servers = NULL,
                 *domains = NULL,
                 *ntas = NULL,
-                *default_route = NULL;
+                *default_route = NULL,
+                *pref64 = NULL;
 
         ResolveSupport s;
         const char *p;
@@ -1393,7 +1402,8 @@ int link_load_user(Link *l) {
                            "SERVERS", &servers,
                            "DOMAINS", &domains,
                            "NTAS", &ntas,
-                           "DEFAULT_ROUTE", &default_route);
+                           "DEFAULT_ROUTE", &default_route,
+                           "PREF64", &pref64);
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
@@ -1419,6 +1429,20 @@ int link_load_user(Link *l) {
 
         /* Same for DNSOverTLS */
         l->dns_over_tls_mode = dns_over_tls_mode_from_string(dns_over_tls);
+
+        if (pref64) {
+                union in_addr_union prefix;
+                unsigned char prefixlen;
+                int family;
+
+                r = in_addr_prefix_from_string_auto(pref64, &family, &prefix, &prefixlen);
+                if (r >= 0 && family == AF_INET6 && IN_SET(prefixlen, 32, 40, 48, 56, 64, 96)) {
+                        l->dns64_prefix = prefix.in6;
+                        l->dns64_prefix_length = prefixlen;
+                        l->dns64_prefix_set = true;
+                } else
+                        log_link_debug(l, "Ignoring invalid PREF64 value: %s", pref64);
+        }
 
         for (p = servers;;) {
                 _cleanup_free_ char *word = NULL;
@@ -1484,6 +1508,36 @@ void link_remove_user(Link *l) {
         assert(l->state_file);
 
         (void) unlink(l->state_file);
+}
+
+int link_set_dns64_prefix(Link *l, const struct in6_addr *prefix, uint8_t prefixlen) {
+        assert(l);
+
+        if (prefix) {
+                if (!IN_SET(prefixlen, 32, 40, 48, 56, 64, 96))
+                        return -EINVAL;
+                l->dns64_prefix = *prefix;
+                l->dns64_prefix_length = prefixlen;
+                l->dns64_prefix_set = true;
+        } else {
+                l->dns64_prefix_set = false;
+        }
+
+        return 0;
+}
+
+bool link_get_dns64_prefix(Link *l, struct in6_addr *ret_prefix, uint8_t *ret_prefixlen) {
+        assert(l);
+
+        if (!l->dns64_prefix_set)
+                return false;
+
+        if (ret_prefix)
+                *ret_prefix = l->dns64_prefix;
+        if (ret_prefixlen)
+                *ret_prefixlen = l->dns64_prefix_length;
+
+        return true;
 }
 
 bool link_negative_trust_anchor_lookup(Link *l, const char *name) {

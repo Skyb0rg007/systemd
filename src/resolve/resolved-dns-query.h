@@ -147,6 +147,7 @@ int dns_query_process_cname_one(DnsQuery *q);
 int dns_query_process_cname_many(DnsQuery *q);
 
 void dns_query_complete(DnsQuery *q, DnsTransactionState state);
+void dns_query_reset_answer(DnsQuery *q);
 
 DnsQuestion* dns_query_question_for_protocol(DnsQuery *q, DnsProtocol protocol);
 

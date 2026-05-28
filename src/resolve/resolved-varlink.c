@@ -13,7 +13,9 @@
 #include "errno-util.h"
 #include "in-addr-util.h"
 #include "iovec-util.h"
+#include "log-link.h"
 #include "json-util.h"
+#include "in-addr-util.h"
 #include "resolved-dns-browse-services.h"
 #include "resolved-dns-dnssec.h"
 #include "resolved-dns-query.h"
@@ -1428,6 +1430,65 @@ static int vl_method_dump_dns_configuration(sd_varlink *link, sd_json_variant *p
         return sd_varlink_reply(link, configuration);
 }
 
+static int vl_method_set_link_dns64_prefix(sd_varlink *link, sd_json_variant *parameters, sd_varlink_method_flags_t flags, void *userdata) {
+        static const sd_json_dispatch_field dispatch_table[] = {
+                { "ifindex", _SD_JSON_VARIANT_TYPE_INVALID, json_dispatch_ifindex, offsetof(LookupParameters, ifindex), SD_JSON_MANDATORY },
+                { "prefix",  SD_JSON_VARIANT_STRING,        sd_json_dispatch_const_string, offsetof(LookupParameters, name), 0 },
+                {}
+        };
+
+        _cleanup_(lookup_parameters_destroy) LookupParameters p = {};
+        Manager *m;
+        int r;
+
+        assert(link);
+
+        m = ASSERT_PTR(sd_varlink_get_userdata(ASSERT_PTR(link)));
+
+        r = sd_varlink_dispatch(link, parameters, dispatch_table, &p);
+        if (r != 0)
+                return r;
+
+        r = verify_polkit(link, parameters, "org.freedesktop.resolve1.set-dns64-prefix");
+        if (r <= 0)
+                return r;
+
+        Link *l = hashmap_get(m->links, INT_TO_PTR(p.ifindex));
+        if (!l)
+                return sd_varlink_error(link, "io.systemd.Resolve.Monitor.NoSuchLink", NULL);
+
+        if (isempty(p.name)) {
+                r = link_set_dns64_prefix(l, NULL, 0);
+                if (r < 0)
+                        return r;
+                log_link_info(l, "Varlink client cleared PREF64 prefix.");
+        } else {
+                union in_addr_union prefix;
+                unsigned char prefixlen;
+                int family;
+
+                r = in_addr_prefix_from_string_auto(p.name, &family, &prefix, &prefixlen);
+                if (r < 0)
+                        return sd_varlink_error_invalid_parameter(link, JSON_VARIANT_STRING_CONST("prefix"));
+                if (family != AF_INET6)
+                        return sd_varlink_error_invalid_parameter(link, JSON_VARIANT_STRING_CONST("prefix"));
+                if (!IN_SET(prefixlen, 32, 40, 48, 56, 64, 96))
+                        return sd_varlink_error_invalid_parameter(link, JSON_VARIANT_STRING_CONST("prefix"));
+
+                r = link_set_dns64_prefix(l, &prefix.in6, prefixlen);
+                if (r < 0)
+                        return r;
+
+                log_link_info(l, "Varlink client set PREF64 prefix to %s/%u.",
+                              IN6_ADDR_TO_STRING(&prefix.in6), prefixlen);
+        }
+
+        (void) link_save_user(l);
+        (void) manager_send_dns_configuration_changed(m, l, /* reset= */ false);
+
+        return sd_varlink_reply(link, NULL);
+}
+
 static int varlink_monitor_server_init(Manager *m) {
         _cleanup_(sd_varlink_server_unrefp) sd_varlink_server *server = NULL;
         int r;
@@ -1452,7 +1513,8 @@ static int varlink_monitor_server_init(Manager *m) {
                         "io.systemd.Resolve.Monitor.DumpServerState", vl_method_dump_server_state,
                         "io.systemd.Resolve.Monitor.DumpStatistics", vl_method_dump_statistics,
                         "io.systemd.Resolve.Monitor.ResetStatistics", vl_method_reset_statistics,
-                        "io.systemd.Resolve.Monitor.SubscribeDNSConfiguration", vl_method_subscribe_dns_configuration);
+                        "io.systemd.Resolve.Monitor.SubscribeDNSConfiguration", vl_method_subscribe_dns_configuration,
+                        "io.systemd.Resolve.Monitor.SetLinkDNS64Prefix", vl_method_set_link_dns64_prefix);
         if (r < 0)
                 return log_error_errno(r, "Failed to register varlink methods: %m");
 
