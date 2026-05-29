@@ -24,6 +24,7 @@
 #include "resolved-dns-server.h"
 #include "resolved-dns-synthesize.h"
 #include "resolved-dns-transaction.h"
+#include "resolved-dns64.h"
 #include "resolved-link.h"
 #include "resolved-manager.h"
 #include "resolved-varlink.h"
@@ -1472,7 +1473,7 @@ static int vl_method_set_link_dns64_prefix(sd_varlink *link, sd_json_variant *pa
                         return sd_varlink_error_invalid_parameter(link, JSON_VARIANT_STRING_CONST("prefix"));
                 if (family != AF_INET6)
                         return sd_varlink_error_invalid_parameter(link, JSON_VARIANT_STRING_CONST("prefix"));
-                if (!IN_SET(prefixlen, 32, 40, 48, 56, 64, 96))
+                if (!dns64_prefix_length_valid(prefixlen))
                         return sd_varlink_error_invalid_parameter(link, JSON_VARIANT_STRING_CONST("prefix"));
 
                 r = link_set_dns64_prefix(l, &prefix.in6, prefixlen);

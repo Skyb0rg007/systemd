@@ -6,6 +6,10 @@
 
 #include "resolved-forward.h"
 
+static inline bool dns64_prefix_length_valid(uint8_t prefix_length) {
+        return IN_SET(prefix_length, 32, 40, 48, 56, 64, 96);
+}
+
 int dns64_synthesize_aaaa(
                 const struct in6_addr *prefix,
                 uint8_t prefix_length,

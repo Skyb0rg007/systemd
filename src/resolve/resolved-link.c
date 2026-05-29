@@ -22,6 +22,7 @@
 #include "parse-util.h"
 #include "resolved-dns-browse-services.h"
 #include "resolved-dns-scope.h"
+#include "resolved-dns64.h"
 #include "resolved-dns-search-domain.h"
 #include "resolved-dns-server.h"
 #include "resolved-link.h"
@@ -1436,7 +1437,7 @@ int link_load_user(Link *l) {
                 int family;
 
                 r = in_addr_prefix_from_string_auto(pref64, &family, &prefix, &prefixlen);
-                if (r >= 0 && family == AF_INET6 && IN_SET(prefixlen, 32, 40, 48, 56, 64, 96)) {
+                if (r >= 0 && family == AF_INET6 && dns64_prefix_length_valid(prefixlen)) {
                         l->dns64_prefix = prefix.in6;
                         l->dns64_prefix_length = prefixlen;
                         l->dns64_prefix_set = true;
@@ -1514,7 +1515,7 @@ int link_set_dns64_prefix(Link *l, const struct in6_addr *prefix, uint8_t prefix
         assert(l);
 
         if (prefix) {
-                if (!IN_SET(prefixlen, 32, 40, 48, 56, 64, 96))
+                if (!dns64_prefix_length_valid(prefixlen))
                         return -EINVAL;
                 l->dns64_prefix = *prefix;
                 l->dns64_prefix_length = prefixlen;
