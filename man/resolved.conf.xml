@@ -229,6 +229,16 @@
         domains (TLDs) that are not known by the DNS root server. This
         logic does not work in all private zone setups.</para>
 
+        <para>Note that AAAA records produced by DNS64 synthesis (see
+        <varname>DNS64=</varname> below) are not covered by any DNSSEC
+        signature: they are derived locally from the underlying A
+        records, which themselves may or may not be DNSSEC-validated.
+        With DNSSEC enabled, such synthesized records are still
+        returned to clients — the AUTHENTICATED status of the answer
+        is inherited from the A query it was synthesized from. Client
+        applications that perform their own DNSSEC re-validation will
+        not be able to validate these records.</para>
+
         <para>Defaults to <literal>&DEFAULT_DNSSEC_MODE;</literal>.</para>
 
         <xi:include href="version-info.xml" xpointer="v229"/>
@@ -453,6 +463,43 @@ DNSStubListenerExtra=udp:[2001:db8:0:f102::13]:9953</programlisting>
         not be flushed when changing servers.</para>
 
         <xi:include href="version-info.xml" xpointer="v254"/>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>DNS64=</varname></term>
+        <listitem><para>Takes a boolean argument. If true (the default),
+        <command>systemd-resolved</command> performs DNS64 synthesis (RFC 6147)
+        on interfaces that have a NAT64 prefix (PREF64) configured. For
+        class-IN AAAA queries that receive an empty or unusable answer
+        (excluding NXDOMAIN), the resolver issues an A query for the same
+        name and synthesizes AAAA records by embedding each returned IPv4
+        address into the interface's PREF64. This lets IPv6-only hosts
+        reach IPv4-only services via a NAT64 gateway.</para>
+
+        <para>If false, DNS64 synthesis is disabled regardless of any
+        configured PREF64. Setting a PREF64 on an interface is the
+        per-interface opt-in; this global toggle is a kill switch.</para>
+
+        <para>A PREF64 may be configured per-interface via
+        <command>resolvectl pref64 <replaceable>LINK</replaceable> <replaceable>PREFIX</replaceable></command>,
+        or it may be supplied by
+        <citerefentry><refentrytitle>systemd-networkd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        in the link's state file. Valid prefix lengths are 32, 40, 48,
+        56, 64, and 96 (RFC 6052 §2.2).</para>
+
+        <para>Synthesized AAAA records carry the
+        <constant>SD_RESOLVED_SYNTHETIC</constant> flag. Their TTL is
+        capped at the minimum of the A record's TTL and 600 seconds, so
+        clients refresh promptly after a PREF64 change. The records are
+        never themselves cached by <command>systemd-resolved</command> —
+        only the underlying A records are — so a PREF64 change takes
+        effect for subsequent queries immediately within the
+        resolver.</para>
+
+        <para>Defaults to true.</para>
+
+        <xi:include href="version-info.xml" xpointer="v258"/>
         </listitem>
       </varlistentry>
     </variablelist>
