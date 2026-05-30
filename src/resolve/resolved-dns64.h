@@ -16,4 +16,6 @@ int dns64_synthesize_aaaa(
                 const struct in_addr *a,
                 struct in6_addr *ret);
 
+void dns64_on_a_query_complete(DnsQuery *aux);
+
 int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state);

@@ -4,6 +4,8 @@
 #include <netinet/in.h>
 
 #include "dns-answer.h"
+#include "dns-domain.h"
+#include "dns-packet.h"
 #include "dns-question.h"
 #include "dns-rr.h"
 #include "dns-type.h"
@@ -171,6 +173,36 @@ static int add_aaaa_rr(DnsAnswer **answer, const char *name, const char *ipv6, u
         return dns_answer_add_extend(answer, rr, 1, DNS_ANSWER_CACHEABLE, NULL);
 }
 
+static int add_cname_rr(DnsAnswer **answer, const char *name, const char *canonical, uint32_t ttl) {
+        _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
+
+        rr = dns_resource_record_new_full(DNS_CLASS_IN, DNS_TYPE_CNAME, name);
+        if (!rr)
+                return -ENOMEM;
+
+        rr->cname.name = strdup(canonical);
+        if (!rr->cname.name)
+                return -ENOMEM;
+
+        rr->ttl = ttl;
+        return dns_answer_add_extend(answer, rr, 1, DNS_ANSWER_CACHEABLE, NULL);
+}
+
+static int add_dname_rr(DnsAnswer **answer, const char *name, const char *target, uint32_t ttl) {
+        _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
+
+        rr = dns_resource_record_new_full(DNS_CLASS_IN, DNS_TYPE_DNAME, name);
+        if (!rr)
+                return -ENOMEM;
+
+        rr->dname.name = strdup(target);
+        if (!rr->dname.name)
+                return -ENOMEM;
+
+        rr->ttl = ttl;
+        return dns_answer_add_extend(answer, rr, 1, DNS_ANSWER_CACHEABLE, NULL);
+}
+
 static bool answer_has_aaaa(DnsAnswer *answer, const char *expected_ipv6) {
         struct in6_addr expected = in6(expected_ipv6);
         DnsResourceRecord *rr;
@@ -184,6 +216,32 @@ static bool answer_has_aaaa(DnsAnswer *answer, const char *expected_ipv6) {
         return false;
 }
 
+static bool answer_has_rr(DnsAnswer *answer, uint16_t type, const char *name) {
+        DnsResourceRecord *rr;
+
+        DNS_ANSWER_FOREACH(rr, answer)
+                if (rr->key->type == type && dns_name_equal(dns_resource_key_name(rr->key), name) > 0)
+                        return true;
+
+        return false;
+}
+
+static bool answer_has_aaaa_name(DnsAnswer *answer, const char *name, const char *expected_ipv6) {
+        struct in6_addr expected = in6(expected_ipv6);
+        DnsResourceRecord *rr;
+
+        DNS_ANSWER_FOREACH(rr, answer) {
+                if (rr->key->type != DNS_TYPE_AAAA)
+                        continue;
+                if (dns_name_equal(dns_resource_key_name(rr->key), name) <= 0)
+                        continue;
+                if (memcmp(&rr->aaaa.in6_addr, &expected, sizeof expected) == 0)
+                        return true;
+        }
+
+        return false;
+}
+
 static size_t answer_count_aaaa(DnsAnswer *answer) {
         DnsResourceRecord *rr;
         size_t n = 0;
@@ -193,6 +251,19 @@ static size_t answer_count_aaaa(DnsAnswer *answer) {
                         n++;
 
         return n;
+}
+
+static void query_complete_record_state(DnsQuery *q) {
+        assert(q);
+}
+
+static DnsTransactionState completed_state;
+
+static void query_complete_free_record_state(DnsQuery *q) {
+        assert(q);
+
+        completed_state = q->state;
+        dns_query_free(q);
 }
 
 /* §5.1: DNS64 acts on AAAA queries.  Pure-A queries are pass-through. */
@@ -262,6 +333,28 @@ TEST(dns_query_dns64_redirect_real_aaaa_blocks_synthesis) {
         ASSERT_TRUE(answer_has_aaaa(query->answer, "2001:db8::1"));
 }
 
+/* §5.1.4: v4-mapped AAAA records are stripped even when another AAAA record
+ * lets the answer complete without DNS64 synthesis. */
+TEST(dns_query_dns64_redirect_mapped_aaaa_stripped_with_real_aaaa) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+        DnsTransactionState state = DNS_TRANSACTION_SUCCESS;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_query(&manager, &query, AF_INET6, 1));
+        ASSERT_OK(add_aaaa_rr(&query->answer, "www.example.com", "::ffff:192.0.2.1", 300));
+        ASSERT_OK(add_aaaa_rr(&query->answer, "www.example.com", "2001:db8::1", 300));
+
+        ASSERT_EQ(dns_query_dns64_redirect(query, &state), 0);
+
+        ASSERT_EQ(answer_count_aaaa(query->answer), (size_t) 1);
+        ASSERT_TRUE(answer_has_aaaa(query->answer, "2001:db8::1"));
+        ASSERT_FALSE(answer_has_aaaa(query->answer, "::ffff:192.0.2.1"));
+}
+
 /* §5.1.4: AAAA records inside ::ffff:0:0/96 are not usable by IPv6-only
  * clients and MUST be treated as though the answer were empty.  When the
  * original query also carried A records, we synthesize inline. */
@@ -283,6 +376,7 @@ TEST(dns_query_dns64_redirect_v4_mapped_aaaa_is_excluded) {
 
         /* Inline synthesis produced a real AAAA from the A record. */
         ASSERT_TRUE(answer_has_aaaa(query->answer, "64:ff9b::c000:201"));
+        ASSERT_FALSE(answer_has_aaaa(query->answer, "::ffff:192.0.2.1"));
         ASSERT_TRUE(FLAGS_SET(query->answer_query_flags, SD_RESOLVED_SYNTHETIC));
 }
 
@@ -432,6 +526,114 @@ TEST(dns_query_dns64_redirect_ttl_inherits_short_a_ttl) {
                         found = true;
                 }
         ASSERT_TRUE(found);
+}
+
+TEST(dns64_auxiliary_success_uses_a_owner_name_and_preserves_chains) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+        DnsQuery *aux = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_query(&manager, &query, AF_INET6, 1));
+        query->complete = query_complete_record_state;
+        query->dns64_original_state = DNS_TRANSACTION_SUCCESS;
+        ASSERT_OK(add_cname_rr(&query->answer, "www.example.com", "alias.example.com", 300));
+        ASSERT_OK(add_dname_rr(&query->answer, "example.com", "example.net", 300));
+
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_a = NULL;
+        ASSERT_OK(dns_question_new_address(&question_a, AF_INET, "www.example.com", false));
+        ASSERT_OK(dns_query_new(&manager, &aux, question_a, question_a, NULL, 1, 0));
+        ASSERT_OK(dns_query_make_auxiliary(aux, query));
+        ASSERT_OK(add_cname_rr(&aux->answer, "www.example.com", "alias.example.com", 300));
+        ASSERT_OK(add_a_rr(&aux->answer, "alias.example.com", "192.0.2.33", 1200));
+        aux->state = DNS_TRANSACTION_SUCCESS;
+
+        dns64_on_a_query_complete(aux);
+
+        ASSERT_EQ(query->state, DNS_TRANSACTION_SUCCESS);
+        ASSERT_TRUE(answer_has_rr(query->answer, DNS_TYPE_CNAME, "www.example.com"));
+        ASSERT_TRUE(answer_has_rr(query->answer, DNS_TYPE_DNAME, "example.com"));
+        ASSERT_TRUE(answer_has_aaaa_name(query->answer, "alias.example.com", "64:ff9b::c000:221"));
+        ASSERT_FALSE(answer_has_rr(query->answer, DNS_TYPE_A, "alias.example.com"));
+        ASSERT_TRUE(FLAGS_SET(query->answer_query_flags, SD_RESOLVED_SYNTHETIC));
+}
+
+TEST(dns64_auxiliary_empty_restores_original_state) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        DnsQuery *query = NULL;
+        DnsQuery *aux = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_query(&manager, &query, AF_INET6, 1));
+        query->complete = query_complete_free_record_state;
+        query->dns64_original_state = DNS_TRANSACTION_TIMEOUT;
+        completed_state = _DNS_TRANSACTION_STATE_INVALID;
+
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_a = NULL;
+        ASSERT_OK(dns_question_new_address(&question_a, AF_INET, "www.example.com", false));
+        ASSERT_OK(dns_query_new(&manager, &aux, question_a, question_a, NULL, 1, 0));
+        ASSERT_OK(dns_query_make_auxiliary(aux, query));
+        aux->state = DNS_TRANSACTION_SUCCESS;
+
+        dns64_on_a_query_complete(aux);
+
+        ASSERT_EQ(completed_state, DNS_TRANSACTION_TIMEOUT);
+}
+
+TEST(dns64_auxiliary_failure_restores_original_state) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        DnsQuery *query = NULL;
+        DnsQuery *aux = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_query(&manager, &query, AF_INET6, 1));
+        query->complete = query_complete_free_record_state;
+        query->dns64_original_state = DNS_TRANSACTION_ATTEMPTS_MAX_REACHED;
+        completed_state = _DNS_TRANSACTION_STATE_INVALID;
+
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_a = NULL;
+        ASSERT_OK(dns_question_new_address(&question_a, AF_INET, "www.example.com", false));
+        ASSERT_OK(dns_query_new(&manager, &aux, question_a, question_a, NULL, 1, 0));
+        ASSERT_OK(dns_query_make_auxiliary(aux, query));
+        aux->state = DNS_TRANSACTION_TIMEOUT;
+
+        dns64_on_a_query_complete(aux);
+
+        ASSERT_EQ(completed_state, DNS_TRANSACTION_ATTEMPTS_MAX_REACHED);
+}
+
+TEST(dns_query_dns64_redirect_cd_do_request_skips_synthesis) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+        _cleanup_(dns_packet_unrefp) DnsPacket *packet = NULL;
+        DnsTransactionState state = DNS_TRANSACTION_SUCCESS;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_query(&manager, &query, AF_UNSPEC, 1));
+        ASSERT_OK(add_a_rr(&query->answer, "www.example.com", "192.0.2.1", 300));
+
+        ASSERT_OK(dns_packet_new_query(&packet, DNS_PROTOCOL_DNS, 0, true));
+        packet->opt = dns_resource_record_new_full(DNS_PACKET_UNICAST_SIZE_LARGE_MAX, DNS_TYPE_OPT, "");
+        ASSERT_NOT_NULL(packet->opt);
+        packet->opt->ttl = 1U << 15;
+        query->request_packet = dns_packet_ref(packet);
+
+        ASSERT_EQ(dns_query_dns64_redirect(query, &state), 0);
+
+        ASSERT_EQ(answer_count_aaaa(query->answer), (size_t) 0);
+        ASSERT_FALSE(FLAGS_SET(query->answer_query_flags, SD_RESOLVED_SYNTHETIC));
 }
 
 /* A combined A+AAAA where the A query yielded zero records and we got

@@ -78,6 +78,7 @@ typedef struct DnsQuery {
         DnsSearchDomain *answer_search_domain;
 
         DnsTransactionState state;
+        DnsTransactionState dns64_original_state;
         int answer_errno; /* if state is DNS_TRANSACTION_ERRNO */
 
         unsigned block_ready;

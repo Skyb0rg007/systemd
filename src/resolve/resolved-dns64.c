@@ -113,62 +113,163 @@ static Link *dns_query_get_dns64_link(DnsQuery *q) {
         return l;
 }
 
+static bool dns64_aaaa_is_excluded(DnsResourceRecord *rr) {
+        assert(rr);
+
+        return rr->key->class == DNS_CLASS_IN &&
+                rr->key->type == DNS_TYPE_AAAA &&
+                in6_addr_is_ipv4_mapped_address(&rr->aaaa.in6_addr);
+}
+
+static int dns64_strip_excluded_aaaa(DnsAnswer **answer) {
+        _cleanup_(dns_answer_unrefp) DnsAnswer *filtered = NULL;
+        DnsAnswerItem *item;
+        bool changed = false;
+        int r;
+
+        assert(answer);
+
+        DNS_ANSWER_FOREACH_ITEM(item, *answer) {
+                if (dns64_aaaa_is_excluded(item->rr)) {
+                        changed = true;
+                        continue;
+                }
+
+                r = dns_answer_add_extend(&filtered, item->rr, item->ifindex, item->flags, item->rrsig);
+                if (r < 0)
+                        return r;
+        }
+
+        if (!changed)
+                return 0;
+
+        DNS_ANSWER_REPLACE(*answer, TAKE_PTR(filtered));
+        return 1;
+}
+
+static bool dns64_answer_has_usable_aaaa(DnsAnswer *answer) {
+        DnsResourceRecord *rr;
+
+        DNS_ANSWER_FOREACH(rr, answer)
+                if (rr->key->class == DNS_CLASS_IN &&
+                    rr->key->type == DNS_TYPE_AAAA &&
+                    !dns64_aaaa_is_excluded(rr))
+                        return true;
+
+        return false;
+}
+
+static size_t dns64_answer_count_usable_aaaa(DnsAnswer *answer) {
+        DnsResourceRecord *rr;
+        size_t n = 0;
+
+        DNS_ANSWER_FOREACH(rr, answer)
+                if (rr->key->class == DNS_CLASS_IN &&
+                    rr->key->type == DNS_TYPE_AAAA &&
+                    !dns64_aaaa_is_excluded(rr))
+                        n++;
+
+        return n;
+}
+
+static int dns64_copy_cname_dname(DnsAnswer **answer, DnsAnswer *source) {
+        DnsAnswerItem *item;
+        int r;
+
+        assert(answer);
+
+        DNS_ANSWER_FOREACH_ITEM(item, source) {
+                if (!IN_SET(item->rr->key->type, DNS_TYPE_CNAME, DNS_TYPE_DNAME))
+                        continue;
+
+                r = dns_answer_add_extend(answer, item->rr, item->ifindex, item->flags, item->rrsig);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
 /* Build a set of synthesized AAAA RRs from A records in source_answer, using
- * l's configured PREF64 prefix. Each AAAA RR is named after a class-IN AAAA
- * key in q's question. Returns 0 on success; *ret_answer may be NULL if no
- * synthesis was possible. */
+ * l's configured PREF64 prefix. Each AAAA RR is named after the source A RR. */
 static int dns64_build_synthesized_answer(
-                DnsQuery *q,
                 Link *l,
                 DnsAnswer *source_answer,
                 int ifindex,
                 DnsAnswer **ret_answer) {
 
         _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
-        DnsResourceKey *key;
+        DnsResourceRecord *rr;
         int r;
 
-        assert(q);
         assert(l);
         assert(ret_answer);
 
-        DNS_QUESTION_FOREACH(key, dns_query_question(q)) {
-                if (key->class != DNS_CLASS_IN || key->type != DNS_TYPE_AAAA)
+        DNS_ANSWER_FOREACH(rr, source_answer) {
+                if (rr->key->class != DNS_CLASS_IN || rr->key->type != DNS_TYPE_A)
                         continue;
 
-                DnsResourceRecord *rr;
-                DNS_ANSWER_FOREACH(rr, source_answer) {
-                        if (rr->key->class != DNS_CLASS_IN || rr->key->type != DNS_TYPE_A)
-                                continue;
+                union in_addr_union synth;
+                if (dns64_synthesize_aaaa(&l->dns64_prefix, l->dns64_prefix_length,
+                                           &rr->a.in_addr, &synth.in6) < 0)
+                        continue;
 
-                        union in_addr_union synth;
-                        if (dns64_synthesize_aaaa(&l->dns64_prefix, l->dns64_prefix_length,
-                                                   &rr->a.in_addr, &synth.in6) < 0)
-                                continue;
+                _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *aaaa = NULL;
+                r = dns_resource_record_new_address(&aaaa, AF_INET6, &synth, dns_resource_key_name(rr->key));
+                if (r < 0)
+                        return r;
 
-                        _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *aaaa = NULL;
-                        r = dns_resource_record_new_address(&aaaa, AF_INET6, &synth,
-                                                            dns_resource_key_name(key));
-                        if (r < 0)
-                                return r;
+                /* RFC 6147 §5.1.7: TTL = min(A TTL, SOA TTL); when SOA
+                 * TTL is unknown use 600s. */
+                aaaa->ttl = MIN(rr->ttl, (uint32_t) 600);
 
-                        /* RFC 6147 §5.1.7: TTL = min(A TTL, SOA TTL); when SOA
-                         * TTL is unknown use 600s. */
-                        aaaa->ttl = MIN(rr->ttl, (uint32_t) 600);
-
-                        r = dns_answer_add_extend(&answer, aaaa, ifindex, DNS_ANSWER_CACHEABLE, NULL);
-                        if (r < 0)
-                                return r;
-                }
+                r = dns_answer_add_extend(&answer, aaaa, ifindex, DNS_ANSWER_CACHEABLE, NULL);
+                if (r < 0)
+                        return r;
         }
 
         *ret_answer = TAKE_PTR(answer);
         return 0;
 }
 
-static void on_dns64_a_query_complete(DnsQuery *aux) {
+static int dns64_build_auxiliary_answer(
+                Link *l,
+                DnsAnswer *original_answer,
+                DnsAnswer *auxiliary_answer,
+                int ifindex,
+                DnsAnswer **ret_answer) {
+
+        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
+        _cleanup_(dns_answer_unrefp) DnsAnswer *synthesized = NULL;
+        int r;
+
+        assert(l);
+        assert(ret_answer);
+
+        r = dns64_copy_cname_dname(&answer, original_answer);
+        if (r < 0)
+                return r;
+
+        r = dns64_copy_cname_dname(&answer, auxiliary_answer);
+        if (r < 0)
+                return r;
+
+        r = dns64_build_synthesized_answer(l, auxiliary_answer, ifindex, &synthesized);
+        if (r < 0)
+                return r;
+
+        r = dns_answer_extend(&answer, synthesized);
+        if (r < 0)
+                return r;
+
+        *ret_answer = TAKE_PTR(answer);
+        return 0;
+}
+
+void dns64_on_a_query_complete(DnsQuery *aux) {
         DnsQuery *q = ASSERT_PTR(aux->auxiliary_for);
         _cleanup_(dns_query_freep) DnsQuery *aux_owned = aux;
+        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
         int r;
 
         assert(q->n_auxiliary_queries > 0);
@@ -183,16 +284,15 @@ static void on_dns64_a_query_complete(DnsQuery *aux) {
         if (aux->state != DNS_TRANSACTION_SUCCESS)
                 goto fail;
 
-        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
-        r = dns64_build_synthesized_answer(q, l, aux->answer, l->ifindex, &answer);
+        r = dns64_build_auxiliary_answer(l, q->answer, aux->answer, l->ifindex, &answer);
         if (r < 0)
                 goto fail;
 
-        if (dns_answer_isempty(answer))
+        size_t n_synthesized = dns64_answer_count_usable_aaaa(answer);
+        if (n_synthesized == 0)
                 goto fail;
 
-        log_debug("DNS64: synthesized %zu AAAA record(s) from auxiliary A query",
-                  dns_answer_size(answer));
+        log_debug("DNS64: synthesized %zu AAAA record(s) from auxiliary A query", n_synthesized);
 
         dns_query_reset_answer(q);
         q->answer = TAKE_PTR(answer);
@@ -206,7 +306,7 @@ static void on_dns64_a_query_complete(DnsQuery *aux) {
         return;
 
 fail:
-        dns_query_complete(q, DNS_TRANSACTION_NOT_FOUND);
+        dns_query_complete(q, q->dns64_original_state);
 }
 
 /*
@@ -230,6 +330,11 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
                 return 0;
 
         if (FLAGS_SET(q->flags, SD_RESOLVED_NO_SYNTHESIZE))
+                return 0;
+
+        if (q->request_packet &&
+            DNS_PACKET_CD(q->request_packet) &&
+            dns_packet_do(q->request_packet))
                 return 0;
 
         /* RFC 6147 §5.1: only act on class-IN AAAA queries. */
@@ -257,12 +362,12 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
         /* RFC §5.1.1 + §5.1.4: if any usable (non-::ffff/96) AAAA record is in
          * the answer, do not synthesize. */
         if (*state == DNS_TRANSACTION_SUCCESS) {
-                DnsResourceRecord *rr;
-                DNS_ANSWER_FOREACH(rr, q->answer)
-                        if (rr->key->class == DNS_CLASS_IN &&
-                            rr->key->type == DNS_TYPE_AAAA &&
-                            !in6_addr_is_ipv4_mapped_address(&rr->aaaa.in6_addr))
-                                return 0;
+                r = dns64_strip_excluded_aaaa(&q->answer);
+                if (r < 0)
+                        return r;
+
+                if (dns64_answer_has_usable_aaaa(q->answer))
+                        return 0;
         }
 
         /* States where the AAAA answer is effectively empty/failed and the
@@ -279,7 +384,7 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
         if (*state == DNS_TRANSACTION_SUCCESS) {
                 _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
 
-                r = dns64_build_synthesized_answer(q, l, q->answer, l->ifindex, &answer);
+                r = dns64_build_synthesized_answer(l, q->answer, l->ifindex, &answer);
                 if (r < 0)
                         return r;
 
@@ -315,7 +420,8 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsTransactionState *state) {
         if (r < 0)
                 return r;
 
-        aux->complete = on_dns64_a_query_complete;
+        q->dns64_original_state = *state;
+        aux->complete = dns64_on_a_query_complete;
 
         r = dns_query_go(aux);
         if (r < 0)
