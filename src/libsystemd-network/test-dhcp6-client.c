@@ -14,6 +14,7 @@
 #include "sd-dhcp6-protocol.h"
 #include "sd-event.h"
 
+#include "dhcp6-client-internal.h"
 #include "dhcp6-internal.h"
 #include "dhcp6-lease-internal.h"
 #include "dhcp6-option.h"
@@ -451,6 +452,73 @@ TEST(client_append_oro_address_registration) {
                                         enabled,
                                         state == DHCP6_STATE_INFORMATION_REQUEST ? 2 :
                                         state == DHCP6_STATE_SOLICITATION ? 1 : 0);
+}
+
+static int test_client_restart_defer_handler(sd_event_source *s, void *userdata) {
+        return 0;
+}
+
+TEST(client_restart_address_registration_discovery) {
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
+        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
+        _cleanup_free_ uint8_t *buf = NULL;
+        size_t offset = 0, option_offset = 0, optlen;
+        const uint8_t *optval;
+        unsigned n_address_registration = 0;
+        uint16_t optcode;
+        int enabled;
+
+        ASSERT_OK(sd_event_new(&event));
+        ASSERT_OK(sd_dhcp6_client_new(&client));
+        ASSERT_OK(sd_dhcp6_client_attach_event(client, event, 0));
+        ASSERT_OK(dhcp6_client_set_address_registration_parameters(
+                          client,
+                          /* enabled= */ true,
+                          DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT,
+                          DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC,
+                          DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL));
+
+        ASSERT_OK(sd_event_add_defer(
+                          event, &client->receive_message, test_client_restart_defer_handler, NULL));
+        client->information_request = true;
+        client->state = DHCP6_STATE_INFORMATION_REQUEST;
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
+        dhcp6_client_address_registration_reset(client);
+        ASSERT_FALSE(client->address_registration.supported);
+
+        ASSERT_OK(dhcp6_client_restart(client));
+        ASSERT_EQ(client->state, DHCP6_STATE_INFORMATION_REQUEST);
+        ASSERT_NOT_NULL(client->timeout_resend);
+        ASSERT_OK(sd_event_source_get_enabled(client->timeout_resend, &enabled));
+        ASSERT_EQ(enabled, SD_EVENT_ONESHOT);
+
+        /* A completed Information-request is stopped until its Information Refresh Time expires, but a
+         * new link attachment must start capability discovery immediately. */
+        ASSERT_OK(sd_event_source_set_enabled(client->receive_message, SD_EVENT_OFF));
+        ASSERT_OK(sd_event_source_set_enabled(client->timeout_resend, SD_EVENT_OFF));
+        client->state = DHCP6_STATE_STOPPED;
+        client->information_request_time_usec = USEC_INFINITY;
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
+        dhcp6_client_address_registration_reset(client);
+        ASSERT_OK(dhcp6_client_restart(client));
+        ASSERT_EQ(client->state, DHCP6_STATE_INFORMATION_REQUEST);
+        ASSERT_OK(sd_event_source_get_enabled(client->timeout_resend, &enabled));
+        ASSERT_EQ(enabled, SD_EVENT_ONESHOT);
+
+        ASSERT_NOT_NULL(buf = new0(uint8_t, 1));
+        ASSERT_OK(dhcp6_client_append_oro(client, &buf, &offset));
+        ASSERT_OK(dhcp6_option_parse(buf, offset, &option_offset, &optcode, &optlen, &optval));
+        ASSERT_EQ(optcode, SD_DHCP6_OPTION_ORO);
+
+        for (size_t i = 0; i < optlen / sizeof(be16_t); i++)
+                if (unaligned_read_be16(optval + i * sizeof(be16_t)) == SD_DHCP6_OPTION_ADDR_REG_ENABLE)
+                        n_address_registration++;
+
+        ASSERT_EQ(n_address_registration, 1U);
 }
 
 TEST(client_parse_message_issue_22099) {

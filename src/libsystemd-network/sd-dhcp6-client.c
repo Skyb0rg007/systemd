@@ -1451,6 +1451,26 @@ int sd_dhcp6_client_stop(sd_dhcp6_client *client) {
         return 0;
 }
 
+int dhcp6_client_restart(sd_dhcp6_client *client) {
+        DHCP6State state;
+
+        assert_return(client, -EINVAL);
+        assert_return(client->event, -EINVAL);
+
+        /* A client that has not exchanged any messages yet should still be started by the normal
+         * configuration or Router Advertisement path. */
+        if (!client->receive_message)
+                return 0;
+
+        state = client->information_request ? DHCP6_STATE_INFORMATION_REQUEST : DHCP6_STATE_SOLICITATION;
+
+        /* The old lease does not belong to the new link attachment. Notify the caller and start over,
+         * but do not send a Release on the newly attached link. */
+        client_stop(client, SD_DHCP6_CLIENT_EVENT_STOP);
+
+        return client_start_transaction(client, state);
+}
+
 int sd_dhcp6_client_is_running(sd_dhcp6_client *client) {
         if (!client)
                 return false;

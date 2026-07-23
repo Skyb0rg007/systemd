@@ -3260,6 +3260,59 @@ MultiPathRoute=2001:db8::1@eth0</programlisting>
       </varlistentry>
 
       <varlistentry>
+        <term><varname>RegisterAddresses=</varname></term>
+        <listitem>
+          <para>Takes a boolean. When true, the DHCPv6 client requests and uses DHCPv6 Address
+          Registration as specified by
+          <ulink url="https://www.rfc-editor.org/rfc/rfc9686.html">RFC 9686</ulink>. Ready global IPv6
+          addresses configured by methods other than DHCPv6 IA_NA are registered when the server
+          advertises support. This is enabled by default and multicasts the client DUID and each eligible
+          address on the link. This may expose stable client and address identifiers to observers; see the
+          <ulink url="https://www.rfc-editor.org/rfc/rfc9686.html#section-7">RFC 9686 privacy
+          considerations</ulink>.</para>
+
+          <para>RFC 9686 recommends not registering when no Router Advertisement with the Managed or Other
+          configuration flag has been received. Explicitly configuring <varname>WithoutRA=</varname>, or
+          <varname>DHCPv6Client=always</varname> in the <literal>[IPv6AcceptRA]</literal> section, acts as an
+          administrator override and permits registration without those flags.</para>
+
+          <xi:include href="version-info.xml" xpointer="v262"/>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>AddressRegistrationInitialRetransmissionTimeSec=</varname></term>
+        <listitem>
+          <para>Specifies the positive initial retransmission time for DHCPv6 Address Registration
+          messages. Defaults to 1 second.</para>
+
+          <xi:include href="version-info.xml" xpointer="v262"/>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>AddressRegistrationMaxRetransmissions=</varname></term>
+        <listitem>
+          <para>Specifies the maximum total number of successfully transmitted messages for each DHCPv6
+          Address Registration exchange, including the initial message. Takes an unsigned integer. A
+          positive value limits the total transmissions, while zero permits unlimited transmissions.
+          Defaults to 3.</para>
+
+          <xi:include href="version-info.xml" xpointer="v262"/>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>StaticAddressRegistrationRefreshIntervalSec=</varname></term>
+        <listitem>
+          <para>Specifies the positive interval between DHCPv6 Address Registration refreshes for
+          addresses with an infinite valid lifetime. Defaults to 4 hours.</para>
+
+          <xi:include href="version-info.xml" xpointer="v262"/>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>SendHostname=</varname></term>
         <listitem>
           <para>When true (the default), the machine's hostname (or the value specified with

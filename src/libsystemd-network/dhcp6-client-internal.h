@@ -9,3 +9,4 @@ int dhcp6_client_set_state_callback(
                 sd_dhcp6_client_callback_t cb,
                 void *userdata);
 int dhcp6_client_get_state(sd_dhcp6_client *client);
+int dhcp6_client_restart(sd_dhcp6_client *client);

@@ -4,6 +4,7 @@
 #include "hexdecoct.h"
 #include "net-condition.h"
 #include "networkd-address.h"
+#include "networkd-dhcp6.h"
 #include "networkd-manager.h"
 #include "networkd-network.h"
 #include "networkd-route.h"
@@ -12,6 +13,46 @@
 #include "set.h"
 #include "strv.h"
 #include "tests.h"
+
+TEST(config_parse_dhcp6_address_registration_time) {
+        usec_t usec = USEC_PER_SEC;
+
+        ASSERT_OK(config_parse_dhcp6_address_registration_time(
+                          "network", "filename", 1, "DHCPv6", 1,
+                          "AddressRegistrationInitialRetransmissionTimeSec",
+                          DHCP6_ADDRESS_REGISTRATION_TIME_IRT, "2.5s", &usec, NULL));
+        ASSERT_EQ(usec, 2500 * USEC_PER_MSEC);
+
+        ASSERT_OK(config_parse_dhcp6_address_registration_time(
+                          "network", "filename", 1, "DHCPv6", 1,
+                          "AddressRegistrationInitialRetransmissionTimeSec",
+                          DHCP6_ADDRESS_REGISTRATION_TIME_IRT, "0", &usec, NULL));
+        ASSERT_EQ(usec, 2500 * USEC_PER_MSEC);
+
+        ASSERT_OK(config_parse_dhcp6_address_registration_time(
+                          "network", "filename", 1, "DHCPv6", 1,
+                          "AddressRegistrationInitialRetransmissionTimeSec",
+                          DHCP6_ADDRESS_REGISTRATION_TIME_IRT, "infinity", &usec, NULL));
+        ASSERT_EQ(usec, 2500 * USEC_PER_MSEC);
+
+        ASSERT_OK(config_parse_dhcp6_address_registration_time(
+                          "network", "filename", 1, "DHCPv6", 1,
+                          "AddressRegistrationInitialRetransmissionTimeSec",
+                          DHCP6_ADDRESS_REGISTRATION_TIME_IRT, "", &usec, NULL));
+        ASSERT_EQ(usec, USEC_PER_SEC);
+
+        ASSERT_OK(config_parse_dhcp6_address_registration_time(
+                          "network", "filename", 1, "DHCPv6", 1,
+                          "StaticAddressRegistrationRefreshIntervalSec",
+                          DHCP6_ADDRESS_REGISTRATION_TIME_STATIC_REFRESH, "30min", &usec, NULL));
+        ASSERT_EQ(usec, 30 * USEC_PER_MINUTE);
+
+        ASSERT_OK(config_parse_dhcp6_address_registration_time(
+                          "network", "filename", 1, "DHCPv6", 1,
+                          "StaticAddressRegistrationRefreshIntervalSec",
+                          DHCP6_ADDRESS_REGISTRATION_TIME_STATIC_REFRESH, "", &usec, NULL));
+        ASSERT_EQ(usec, 4 * USEC_PER_HOUR);
+}
 
 static void test_config_parse_duid_type_one(const char *rvalue, DUIDType expected, usec_t expected_time) {
         DUID actual = {};

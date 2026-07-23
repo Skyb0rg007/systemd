@@ -4,11 +4,13 @@
 ***/
 
 #include <linux/if_addr.h>
+#include <linux/rtnetlink.h>
 #include <stdio.h>
 
 #include "sd-dhcp6-protocol.h"
 
 #include "conf-parser.h"
+#include "dhcp6-address-registration.h"
 #include "dhcp6-client-internal.h"
 #include "dhcp6-lease-internal.h"
 #include "errno-util.h"
@@ -34,6 +36,83 @@ bool link_dhcp6_with_address_enabled(Link *link) {
                 return false;
 
         return link->network->dhcp6_use_address;
+}
+
+bool dhcp6_address_is_eligible_for_registration(const Address *address) {
+        assert(address);
+
+        return address->family == AF_INET6 &&
+               address->scope == RT_SCOPE_UNIVERSE &&
+               address->source != NETWORK_CONFIG_SOURCE_DHCP6 &&
+               address_is_ready(address);
+}
+
+static int dhcp6_sync_address_registration_to_client(
+                sd_dhcp6_client *client,
+                const Address *address,
+                bool enabled) {
+
+        assert(client);
+        assert(address);
+
+        if (!enabled || !dhcp6_address_is_eligible_for_registration(address)) {
+                if (address->family == AF_INET6)
+                        dhcp6_client_remove_address_registration(client, &address->in_addr.in6);
+                return 0;
+        }
+
+        return dhcp6_client_update_address_registration(
+                        client,
+                        &address->in_addr.in6,
+                        address->lifetime_preferred_usec,
+                        address->lifetime_valid_usec);
+}
+
+int dhcp6_sync_address_registration(Link *link, const Address *address) {
+        int r;
+
+        assert(link);
+        assert(address);
+
+        if (!link->dhcp6_client || !link->network)
+                return 0;
+
+        r = dhcp6_sync_address_registration_to_client(
+                        link->dhcp6_client, address, link->network->dhcp6_register_addresses);
+        if (r < 0) {
+                log_link_warning_errno(link, r, "Failed to synchronize DHCPv6 address registration, ignoring: %m");
+                return 0;
+        }
+
+        return r;
+}
+
+void dhcp6_remove_address_registration(Link *link, const Address *address) {
+        assert(link);
+        assert(address);
+
+        if (link->dhcp6_client && address->family == AF_INET6)
+                dhcp6_client_remove_address_registration(link->dhcp6_client, &address->in_addr.in6);
+}
+
+void dhcp6_reset_address_registration(Link *link) {
+        assert(link);
+
+        if (link->dhcp6_client)
+                dhcp6_client_address_registration_reset(link->dhcp6_client);
+}
+
+int dhcp6_restart_on_new_attachment(Link *link) {
+        assert(link);
+
+        dhcp6_reset_address_registration(link);
+
+        if (!link->dhcp6_client)
+                return 0;
+
+        log_link_debug(link, "Restarting DHCPv6 client on new link attachment.");
+
+        return dhcp6_client_restart(link->dhcp6_client);
 }
 
 static DHCP6ClientStartMode link_get_dhcp6_client_start_mode(Link *link) {
@@ -609,6 +688,7 @@ static int dhcp6_set_identifier(Link *link, sd_dhcp6_client *client) {
 
 static int dhcp6_configure(Link *link) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
+        Address *address;
         sd_dhcp6_option *vendor_option;
         sd_dhcp6_option *send_option;
         void *request_options;
@@ -653,6 +733,16 @@ static int dhcp6_configure(Link *link) {
         r = sd_dhcp6_client_set_ifindex(client, link->ifindex);
         if (r < 0)
                 return log_link_debug_errno(link, r, "DHCPv6 CLIENT: Failed to set ifindex: %m");
+
+        r = dhcp6_client_set_address_registration_parameters(
+                        client,
+                        link->network->dhcp6_register_addresses,
+                        link->network->dhcp6_address_registration_initial_retransmission_time_usec,
+                        link->network->dhcp6_address_registration_max_retransmissions,
+                        link->network->dhcp6_static_address_registration_refresh_interval_usec);
+        if (r < 0)
+                return log_link_debug_errno(
+                                link, r, "DHCPv6 CLIENT: Failed to set address registration parameters: %m");
 
         if (link->network->dhcp6_mudurl) {
                 r = sd_dhcp6_client_set_request_mud_url(client, link->network->dhcp6_mudurl);
@@ -775,6 +865,14 @@ static int dhcp6_configure(Link *link) {
                 return log_link_debug_errno(link, r,
                                             "DHCPv6 CLIENT: Failed to %s sending release message on stop: %m",
                                             enable_disable(link->network->dhcp6_send_release));
+
+        SET_FOREACH(address, link->addresses) {
+                r = dhcp6_sync_address_registration_to_client(
+                                client, address, link->network->dhcp6_register_addresses);
+                if (r < 0)
+                        log_link_warning_errno(
+                                        link, r, "DHCPv6 CLIENT: Failed to synchronize address registration, ignoring: %m");
+        }
 
         link->dhcp6_client = TAKE_PTR(client);
 
@@ -901,6 +999,51 @@ int link_serialize_dhcp6_client(Link *link, FILE *f) {
         if (r >= 0)
                 fprintf(f, "DHCP6_CLIENT_DUID=%s\n", duid);
 
+        return 0;
+}
+
+int config_parse_dhcp6_address_registration_time(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        usec_t *usec = ASSERT_PTR(data), value;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(ltype >= 0 && ltype < _DHCP6_ADDRESS_REGISTRATION_TIME_MAX);
+
+        if (isempty(rvalue)) {
+                *usec = ltype == DHCP6_ADDRESS_REGISTRATION_TIME_IRT ?
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT :
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL;
+                return 0;
+        }
+
+        r = parse_sec(rvalue, &value);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to parse %s=, ignoring assignment: %s", lvalue, rvalue);
+                return 0;
+        }
+
+        if (!timestamp_is_set(value)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "%s= must be a positive finite duration, ignoring assignment: %s",
+                           lvalue, rvalue);
+                return 0;
+        }
+
+        *usec = value;
         return 0;
 }
 

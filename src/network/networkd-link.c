@@ -1933,6 +1933,8 @@ static int link_carrier_lost_impl(Link *link) {
         if (!link->network)
                 return ret;
 
+        dhcp6_reset_address_registration(link);
+
         RET_GATHER(ret, link_stop_engines(link, /* may_keep_dynamic= */ false));
         RET_GATHER(ret, link_drop_static_config(link));
 
