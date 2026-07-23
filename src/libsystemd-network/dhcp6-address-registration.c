@@ -303,6 +303,25 @@ static int address_registration_schedule_refresh(
         return address_registration_schedule_timer(registration, deadline_usec, /* refresh= */ true);
 }
 
+static usec_t address_registration_refresh_target(
+                sd_dhcp6_client *client,
+                usec_t valid_remaining_usec,
+                usec_t now_usec) {
+
+        assert(client);
+
+        if (valid_remaining_usec == USEC_INFINITY)
+                /* Static addresses have no lifetime update to trigger a refresh, so keep a timer armed. */
+                return usec_add(now_usec, client->address_registration.static_refresh_interval_usec);
+
+        /* RFC 9686 section 4.6.1 refreshes at 80% of the valid lifetime. One per-link factor
+         * desynchronizes all addresses consistently while retaining their relative timing. */
+        return usec_add(
+                        now_usec,
+                        dhcp6_address_registration_refresh_interval(
+                                        valid_remaining_usec, client->address_registration.desync_multiplier));
+}
+
 static int address_registration_set_next_refresh(
                 DHCP6AddressRegistration *registration,
                 usec_t now_usec) {
@@ -316,20 +335,10 @@ static int address_registration_set_next_refresh(
         valid_usec = address_registration_lifetime_remaining(
                         registration->lifetime_valid_usec, now_usec);
         registration->lifetime_valid_reference_usec = registration->lifetime_valid_usec;
+        registration->next_refresh_usec = address_registration_refresh_target(client, valid_usec, now_usec);
 
-        if (valid_usec == USEC_INFINITY) {
-                /* Static addresses have no lifetime update to trigger a refresh, so keep a timer armed. */
-                registration->next_refresh_usec = usec_add(
-                                now_usec, client->address_registration.static_refresh_interval_usec);
+        if (valid_usec == USEC_INFINITY)
                 return address_registration_schedule_refresh(registration, registration->next_refresh_usec);
-        }
-
-        /* RFC 9686 section 4.6.1 refreshes at 80% of the valid lifetime. One per-link factor
-         * desynchronizes all addresses consistently while retaining their relative timing. */
-        registration->next_refresh_usec = usec_add(
-                        now_usec,
-                        dhcp6_address_registration_refresh_interval(
-                                valid_usec, client->address_registration.desync_multiplier));
 
         return 0;
 }
@@ -421,7 +430,7 @@ int dhcp6_client_update_address_registration_at(
         assert(client);
         assert(address);
 
-        if (lifetime_valid_usec != USEC_INFINITY && lifetime_valid_usec <= now_usec) {
+        if (address_registration_lifetime_remaining(lifetime_valid_usec, now_usec) == 0) {
                 dhcp6_client_remove_address_registration(client, address);
                 return 0;
         }
@@ -486,18 +495,8 @@ int dhcp6_client_update_address_registration_at(
                 }
 
                 if (changed) {
-                        usec_t candidate_usec;
-
-                        if (valid_remaining_usec == USEC_INFINITY)
-                                candidate_usec = usec_add(
-                                                now_usec,
-                                                client->address_registration.static_refresh_interval_usec);
-                        else
-                                candidate_usec = usec_add(
-                                                now_usec,
-                                                dhcp6_address_registration_refresh_interval(
-                                                        valid_remaining_usec,
-                                                        client->address_registration.desync_multiplier));
+                        usec_t candidate_usec = address_registration_refresh_target(
+                                        client, valid_remaining_usec, now_usec);
 
                         /* Neither a later lifetime update nor the original refresh target may postpone a
                          * refresh that is already armed for an earlier time. */
@@ -813,8 +812,7 @@ int dhcp6_client_process_address_registration_reply_at(
         registration = hashmap_get(client->address_registration.registrations, destination);
         if (!registration || !registration->transaction_active)
                 return 0;
-        if (registration->lifetime_valid_usec != USEC_INFINITY &&
-            registration->lifetime_valid_usec <= now_usec) {
+        if (address_registration_lifetime_remaining(registration->lifetime_valid_usec, now_usec) == 0) {
                 dhcp6_client_remove_address_registration(client, destination);
                 return 0;
         }
