@@ -20,29 +20,6 @@
 
 typedef struct DHCP6AddressRegistration DHCP6AddressRegistration;
 
-typedef struct DHCP6AddressRegistrationIO {
-        int (*open_socket)(int ifindex, void *userdata);
-        int (*send)(
-                        int fd,
-                        const struct in6_addr *source,
-                        int ifindex,
-                        const struct sockaddr_in6 *destination,
-                        const void *packet,
-                        size_t len,
-                        void *userdata);
-        int (*receive)(
-                        int fd,
-                        void **ret_packet,
-                        size_t *ret_len,
-                        struct sockaddr_in6 *ret_sender,
-                        struct in6_addr *ret_destination,
-                        int *ret_ifindex,
-                        bool *ret_truncated,
-                        void *userdata);
-        uint32_t (*random_u32)(void *userdata);
-        uint64_t (*random_u64_range)(uint64_t upper_bound, void *userdata);
-} DHCP6AddressRegistrationIO;
-
 struct DHCP6AddressRegistration {
         sd_dhcp6_client *client; /* weak */
         struct in6_addr address;
@@ -74,10 +51,26 @@ typedef struct DHCP6AddressRegistrationEngine {
         unsigned max_retransmissions;
         usec_t static_refresh_interval_usec;
         unsigned desync_multiplier;
-
-        const DHCP6AddressRegistrationIO *io;
-        void *io_userdata;
 } DHCP6AddressRegistrationEngine;
+
+int dhcp6_address_registration_open_socket(int ifindex);
+int dhcp6_address_registration_send(
+                int fd,
+                const struct in6_addr *source,
+                int ifindex,
+                const struct sockaddr_in6 *destination,
+                const void *packet,
+                size_t len);
+int dhcp6_address_registration_receive(
+                int fd,
+                void **ret_packet,
+                size_t *ret_len,
+                struct sockaddr_in6 *ret_sender,
+                struct in6_addr *ret_destination,
+                int *ret_ifindex,
+                bool *ret_truncated);
+uint32_t dhcp6_address_registration_random_u32(void);
+uint64_t dhcp6_address_registration_random_u64_range(uint64_t upper_bound);
 
 int dhcp6_client_set_address_registration_parameters(
                 sd_dhcp6_client *client,
@@ -137,10 +130,6 @@ DHCP6AddressRegistration *dhcp6_client_get_address_registration(
                 sd_dhcp6_client *client,
                 const struct in6_addr *address);
 size_t dhcp6_client_address_registration_count(sd_dhcp6_client *client);
-void dhcp6_client_set_address_registration_io(
-                sd_dhcp6_client *client,
-                const DHCP6AddressRegistrationIO *io,
-                void *userdata);
 
 usec_t dhcp6_address_registration_initial_retransmission_time(usec_t irt_usec, uint64_t random);
 usec_t dhcp6_address_registration_next_retransmission_time(usec_t previous_usec, uint64_t random);

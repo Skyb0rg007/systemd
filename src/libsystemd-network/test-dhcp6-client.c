@@ -1074,7 +1074,7 @@ typedef struct AddressRegistrationSentPacket {
         unsigned n_server_id;
 } AddressRegistrationSentPacket;
 
-typedef struct AddressRegistrationTestIO {
+typedef struct AddressRegistrationTest {
         unsigned n_open;
         unsigned n_open_failures;
         unsigned n_send_attempts;
@@ -1091,10 +1091,13 @@ typedef struct AddressRegistrationTestIO {
         struct in6_addr receive_destination;
         int receive_ifindex;
         bool receive_truncated;
-} AddressRegistrationTestIO;
+} AddressRegistrationTest;
 
-static int test_address_registration_open_socket(int ifindex, void *userdata) {
-        AddressRegistrationTestIO *test = ASSERT_PTR(userdata);
+static AddressRegistrationTest default_address_registration_test;
+static AddressRegistrationTest *address_registration_test = &default_address_registration_test;
+
+int dhcp6_address_registration_open_socket(int ifindex) {
+        AddressRegistrationTest *test = ASSERT_PTR(address_registration_test);
 
         ASSERT_GT(ifindex, 0);
         test->n_open++;
@@ -1107,16 +1110,15 @@ static int test_address_registration_open_socket(int ifindex, void *userdata) {
         return eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 }
 
-static int test_address_registration_send(
+int dhcp6_address_registration_send(
                 int fd,
                 const struct in6_addr *source,
                 int ifindex,
                 const struct sockaddr_in6 *destination,
                 const void *packet,
-                size_t len,
-                void *userdata) {
+                size_t len) {
 
-        AddressRegistrationTestIO *test = ASSERT_PTR(userdata);
+        AddressRegistrationTest *test = ASSERT_PTR(address_registration_test);
         const DHCP6Message *message = ASSERT_PTR(packet);
         AddressRegistrationSentPacket *sent;
         size_t offset = offsetof(DHCP6Message, options);
@@ -1172,17 +1174,16 @@ static int test_address_registration_send(
         return 0;
 }
 
-static int test_address_registration_receive(
+int dhcp6_address_registration_receive(
                 int fd,
                 void **ret_packet,
                 size_t *ret_len,
                 struct sockaddr_in6 *ret_sender,
                 struct in6_addr *ret_destination,
                 int *ret_ifindex,
-                bool *ret_truncated,
-                void *userdata) {
+                bool *ret_truncated) {
 
-        AddressRegistrationTestIO *test = ASSERT_PTR(userdata);
+        AddressRegistrationTest *test = ASSERT_PTR(address_registration_test);
         void *packet;
 
         ASSERT_GE(fd, 0);
@@ -1201,29 +1202,23 @@ static int test_address_registration_receive(
         return 0;
 }
 
-static uint32_t test_address_registration_random_u32(void *userdata) {
-        AddressRegistrationTestIO *test = ASSERT_PTR(userdata);
+uint32_t dhcp6_address_registration_random_u32(void) {
+        AddressRegistrationTest *test = ASSERT_PTR(address_registration_test);
 
         return test->next_transaction_id++;
 }
 
-static uint64_t test_address_registration_random_u64_range(uint64_t upper_bound, void *userdata) {
-        AddressRegistrationTestIO *test = ASSERT_PTR(userdata);
+uint64_t dhcp6_address_registration_random_u64_range(uint64_t upper_bound) {
+        AddressRegistrationTest *test = ASSERT_PTR(address_registration_test);
 
         ASSERT_GT(upper_bound, 0U);
         return test->random_value % upper_bound;
 }
 
-static const DHCP6AddressRegistrationIO test_address_registration_io = {
-        .open_socket = test_address_registration_open_socket,
-        .send = test_address_registration_send,
-        .receive = test_address_registration_receive,
-        .random_u32 = test_address_registration_random_u32,
-        .random_u64_range = test_address_registration_random_u64_range,
-};
-
-static sd_dhcp6_client *test_address_registration_client_new(AddressRegistrationTestIO *test) {
+static sd_dhcp6_client *test_address_registration_client_new(AddressRegistrationTest *test) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
+
+        address_registration_test = ASSERT_PTR(test);
 
         ASSERT_OK(sd_dhcp6_client_new(&client));
         ASSERT_OK(sd_dhcp6_client_set_ifindex(client, test_ifindex));
@@ -1232,7 +1227,6 @@ static sd_dhcp6_client *test_address_registration_client_new(AddressRegistration
                         unaligned_read_be16(client_id),
                         client_id + sizeof(be16_t),
                         sizeof(client_id) - sizeof(be16_t)));
-        dhcp6_client_set_address_registration_io(client, &test_address_registration_io, test);
         return TAKE_PTR(client);
 }
 
@@ -1292,7 +1286,7 @@ static void test_address_registration_ack_at(
 }
 
 TEST(address_registration_exchange) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 0x123456,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1389,7 +1383,7 @@ TEST(address_registration_mrc) {
         };
 
         FOREACH_ELEMENT(c, cases) {
-                AddressRegistrationTestIO test = {
+                AddressRegistrationTest test = {
                         .next_transaction_id = 0x123456,
                 };
                 _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1413,11 +1407,11 @@ TEST(address_registration_mrc) {
         }
 }
 
-TEST(address_registration_io_failures) {
+TEST(address_registration_network_failures) {
         const usec_t now_usec = 100 * USEC_PER_SEC;
 
         {
-                AddressRegistrationTestIO test = {
+                AddressRegistrationTest test = {
                         .n_open_failures = 1,
                         .next_transaction_id = 0x123456,
                 };
@@ -1447,7 +1441,7 @@ TEST(address_registration_io_failures) {
         }
 
         {
-                AddressRegistrationTestIO test = {
+                AddressRegistrationTest test = {
                         .n_send_failures = 1,
                         .next_transaction_id = 0x123456,
                 };
@@ -1475,7 +1469,7 @@ TEST(address_registration_io_failures) {
         }
 
         {
-                AddressRegistrationTestIO test = {
+                AddressRegistrationTest test = {
                         .n_open_failures = UINT_MAX,
                         .next_transaction_id = 0x123456,
                 };
@@ -1506,7 +1500,7 @@ TEST(address_registration_io_failures) {
 }
 
 TEST(address_registration_event_migration) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 0x123456,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1557,7 +1551,7 @@ TEST(address_registration_event_migration) {
 }
 
 TEST(address_registration_discovery_starts_existing) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 0x123456,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1614,7 +1608,7 @@ TEST(address_registration_retransmission_time) {
 }
 
 TEST(address_registration_finite_refresh) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 0x123456,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1721,7 +1715,7 @@ TEST(address_registration_finite_refresh) {
 }
 
 TEST(address_registration_static_refresh_and_parameters) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 0x654321,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1784,7 +1778,7 @@ TEST(address_registration_static_refresh_and_parameters) {
 }
 
 TEST(address_registration_shared_desynchronization) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 1,
                 .random_value = 200000,
         };
@@ -1824,7 +1818,7 @@ TEST(address_registration_shared_desynchronization) {
 }
 
 TEST(address_registration_reply_validation) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 0x654321,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -1908,7 +1902,7 @@ TEST(address_registration_reply_validation) {
 }
 
 TEST(address_registration_disabled) {
-        AddressRegistrationTestIO test = {
+        AddressRegistrationTest test = {
                 .next_transaction_id = 1,
         };
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
@@ -2185,6 +2179,9 @@ int dhcp6_network_bind_udp_socket(int ifindex, const struct in6_addr *a) {
 TEST(dhcp6_client) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
         _cleanup_(sd_event_unrefp) sd_event *e = NULL;
+
+        default_address_registration_test = (AddressRegistrationTest) {};
+        address_registration_test = &default_address_registration_test;
 
         assert_se(sd_event_new(&e) >= 0);
         assert_se(sd_event_add_time_relative(e, NULL, CLOCK_BOOTTIME,

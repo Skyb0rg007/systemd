@@ -14,185 +14,11 @@
 #include "fd-util.h"
 #include "hashmap.h"
 #include "in-addr-util.h"
-#include "iovec-util.h"
 #include "macro.h"
-#include "network-common.h"
-#include "random-util.h"
-#include "socket-util.h"
 
 static int address_registration_receive_event(sd_event_source *s, int fd, uint32_t revents, void *userdata);
 static int address_registration_refresh_event(sd_event_source *s, uint64_t usec, void *userdata);
 static int address_registration_retransmit_event(sd_event_source *s, uint64_t usec, void *userdata);
-
-static int address_registration_open_socket(int ifindex, void *userdata) {
-        union sockaddr_union source = {
-                .in6.sin6_family = AF_INET6,
-                .in6.sin6_addr = IN6ADDR_ANY_INIT,
-                .in6.sin6_port = htobe16(DHCP6_PORT_CLIENT),
-        };
-        _cleanup_close_ int fd = -EBADF;
-        int r;
-
-        assert(ifindex > 0);
-
-        fd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_UDP);
-        if (fd < 0)
-                return -errno;
-
-        r = setsockopt_int(fd, IPPROTO_IPV6, IPV6_V6ONLY, true);
-        if (r < 0)
-                return r;
-
-        r = setsockopt_int(fd, SOL_SOCKET, SO_REUSEADDR, true);
-        if (r < 0)
-                return r;
-
-        r = setsockopt_int(fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, false);
-        if (r < 0)
-                return r;
-
-        r = socket_set_recvpktinfo(fd, AF_INET6, true);
-        if (r < 0)
-                return r;
-
-        r = socket_bind_to_ifindex(fd, ifindex);
-        if (r < 0)
-                return r;
-
-        if (bind(fd, &source.sa, sizeof(source.in6)) < 0)
-                return -errno;
-
-        return TAKE_FD(fd);
-}
-
-static int address_registration_send(
-                int fd,
-                const struct in6_addr *source,
-                int ifindex,
-                const struct sockaddr_in6 *destination,
-                const void *packet,
-                size_t len,
-                void *userdata) {
-
-        CMSG_BUFFER_TYPE(CMSG_SPACE(sizeof(struct in6_pktinfo))) control = {};
-        struct iovec iov = IOVEC_MAKE((void*) packet, len);
-        struct msghdr message = {
-                .msg_name = (struct sockaddr_in6*) destination,
-                .msg_namelen = sizeof(*destination),
-                .msg_iov = &iov,
-                .msg_iovlen = 1,
-                .msg_control = &control,
-                .msg_controllen = sizeof(control),
-        };
-        struct cmsghdr *cmsg;
-        struct in6_pktinfo *pktinfo;
-        ssize_t n;
-
-        assert(fd >= 0);
-        assert(source);
-        assert(ifindex > 0);
-        assert(destination);
-        assert(packet);
-
-        cmsg = CMSG_FIRSTHDR(&message);
-        assert(cmsg);
-        cmsg->cmsg_level = IPPROTO_IPV6;
-        cmsg->cmsg_type = IPV6_PKTINFO;
-        cmsg->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-
-        pktinfo = (struct in6_pktinfo*) CMSG_DATA(cmsg);
-        *pktinfo = (struct in6_pktinfo) {
-                .ipi6_addr = *source,
-                .ipi6_ifindex = ifindex,
-        };
-
-        n = sendmsg(fd, &message, MSG_NOSIGNAL);
-        if (n < 0)
-                return -errno;
-        if ((size_t) n != len)
-                return -EIO;
-
-        return 0;
-}
-
-static int address_registration_receive(
-                int fd,
-                void **ret_packet,
-                size_t *ret_len,
-                struct sockaddr_in6 *ret_sender,
-                struct in6_addr *ret_destination,
-                int *ret_ifindex,
-                bool *ret_truncated,
-                void *userdata) {
-
-        CMSG_BUFFER_TYPE(CMSG_SPACE(sizeof(struct in6_pktinfo))) control = {};
-        union sockaddr_union sender = {};
-        _cleanup_free_ void *packet = NULL;
-        struct iovec iov;
-        struct msghdr message = {
-                .msg_name = &sender.sa,
-                .msg_namelen = sizeof(sender),
-                .msg_iov = &iov,
-                .msg_iovlen = 1,
-                .msg_control = &control,
-                .msg_controllen = sizeof(control),
-        };
-        ssize_t buflen, len;
-
-        assert(fd >= 0);
-        assert(ret_packet);
-        assert(ret_len);
-        assert(ret_sender);
-        assert(ret_destination);
-        assert(ret_ifindex);
-        assert(ret_truncated);
-
-        buflen = next_datagram_size_fd(fd);
-        if (buflen < 0)
-                return (int) buflen;
-
-        packet = malloc(MAX(buflen, (ssize_t) 1));
-        if (!packet)
-                return -ENOMEM;
-
-        iov = IOVEC_MAKE(packet, buflen);
-        len = recvmsg_safe(fd, &message, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
-        if (len < 0)
-                return (int) len;
-
-        struct in6_pktinfo *pktinfo =
-                CMSG_FIND_DATA(&message, IPPROTO_IPV6, IPV6_PKTINFO, struct in6_pktinfo);
-
-        *ret_packet = TAKE_PTR(packet);
-        *ret_len = MIN((size_t) len, (size_t) buflen);
-        *ret_sender = sender.in6;
-        *ret_destination = pktinfo ? pktinfo->ipi6_addr : in6addr_any;
-        *ret_ifindex = pktinfo ? pktinfo->ipi6_ifindex : 0;
-        *ret_truncated = FLAGS_SET(message.msg_flags, MSG_TRUNC);
-        return 0;
-}
-
-static uint32_t address_registration_random_u32(void *userdata) {
-        return random_u32();
-}
-
-static uint64_t address_registration_random_u64_range(uint64_t upper_bound, void *userdata) {
-        return random_u64_range(upper_bound);
-}
-
-static const DHCP6AddressRegistrationIO address_registration_default_io = {
-        .open_socket = address_registration_open_socket,
-        .send = address_registration_send,
-        .receive = address_registration_receive,
-        .random_u32 = address_registration_random_u32,
-        .random_u64_range = address_registration_random_u64_range,
-};
-
-static const DHCP6AddressRegistrationIO* address_registration_get_io(sd_dhcp6_client *client) {
-        assert(client);
-
-        return client->address_registration.io ?: &address_registration_default_io;
-}
 
 static DHCP6AddressRegistration *address_registration_free(DHCP6AddressRegistration *registration) {
         if (!registration)
@@ -263,7 +89,6 @@ static int address_registration_attach_receive_event(sd_dhcp6_client *client) {
 
 static int address_registration_ensure_socket(sd_dhcp6_client *client) {
         DHCP6AddressRegistrationEngine *engine;
-        const DHCP6AddressRegistrationIO *io;
         int r;
 
         assert(client);
@@ -274,8 +99,7 @@ static int address_registration_ensure_socket(sd_dhcp6_client *client) {
                 assert(engine->supported);
                 assert(client->ifindex > 0);
 
-                io = address_registration_get_io(client);
-                r = io->open_socket(client->ifindex, engine->io_userdata);
+                r = dhcp6_address_registration_open_socket(client->ifindex);
                 if (r < 0)
                         return r;
 
@@ -357,14 +181,13 @@ static int address_registration_send_message(DHCP6AddressRegistration *registrat
         if (r < 0)
                 goto fail;
 
-        r = address_registration_get_io(client)->send(
+        r = dhcp6_address_registration_send(
                         client->address_registration.fd,
                         &registration->address,
                         client->ifindex,
                         &destination,
                         buf,
-                        offset,
-                        client->address_registration.io_userdata);
+                        offset);
         if (r < 0)
                 goto fail;
 
@@ -427,8 +250,7 @@ static usec_t address_registration_randomized_initial_retransmission_time(sd_dhc
         span = engine->initial_retransmission_time_usec / 5;
         return dhcp6_address_registration_initial_retransmission_time(
                         engine->initial_retransmission_time_usec,
-                        address_registration_get_io(client)->random_u64_range(
-                                span + 1, engine->io_userdata));
+                        dhcp6_address_registration_random_u64_range(span + 1));
 }
 
 static usec_t address_registration_randomized_next_retransmission_time(
@@ -442,8 +264,7 @@ static usec_t address_registration_randomized_next_retransmission_time(
         span = previous_usec / 5;
         return dhcp6_address_registration_next_retransmission_time(
                         previous_usec,
-                        address_registration_get_io(client)->random_u64_range(
-                                span + 1, client->address_registration.io_userdata));
+                        dhcp6_address_registration_random_u64_range(span + 1));
 }
 
 static int address_registration_arm_retransmission(DHCP6AddressRegistration *registration) {
@@ -566,8 +387,7 @@ static int address_registration_start_transaction(
         address_registration_cancel_refresh(registration);
         registration->next_refresh_usec = USEC_INFINITY;
 
-        transaction_id = address_registration_get_io(client)->random_u32(
-                                client->address_registration.io_userdata) & 0x00ffffffU;
+        transaction_id = dhcp6_address_registration_random_u32() & 0x00ffffffU;
         if (registration->has_been_registered && htobe32(transaction_id) == previous_transaction_id)
                 transaction_id = (transaction_id + 1) & 0x00ffffffU;
         registration->transaction_id = htobe32(transaction_id);
@@ -797,10 +617,9 @@ int dhcp6_client_address_registration_discover_at(
         client->address_registration.supported = true;
         client->address_registration.desync_multiplier =
                 DHCP6_ADDRESS_REGISTRATION_DESYNC_MIN +
-                address_registration_get_io(client)->random_u64_range(
+                dhcp6_address_registration_random_u64_range(
                                 DHCP6_ADDRESS_REGISTRATION_DESYNC_MAX -
-                                DHCP6_ADDRESS_REGISTRATION_DESYNC_MIN + 1,
-                                client->address_registration.io_userdata);
+                                DHCP6_ADDRESS_REGISTRATION_DESYNC_MIN + 1);
 
         HASHMAP_FOREACH(registration, client->address_registration.registrations) {
                 r = address_registration_start_transaction(registration, now_usec);
@@ -1057,7 +876,6 @@ int dhcp6_client_process_address_registration_reply_at(
 }
 
 int dhcp6_client_receive_address_registration_reply(sd_dhcp6_client *client) {
-        const DHCP6AddressRegistrationIO *io = address_registration_get_io(client);
         _cleanup_free_ void *packet = NULL;
         struct sockaddr_in6 sender;
         struct in6_addr destination;
@@ -1067,15 +885,14 @@ int dhcp6_client_receive_address_registration_reply(sd_dhcp6_client *client) {
 
         assert(client);
 
-        r = io->receive(
+        r = dhcp6_address_registration_receive(
                         client->address_registration.fd,
                         &packet,
                         &len,
                         &sender,
                         &destination,
                         &ifindex,
-                        &truncated,
-                        client->address_registration.io_userdata);
+                        &truncated);
         if (ERRNO_IS_TRANSIENT(r) || ERRNO_IS_DISCONNECT(r))
                 return 0;
         if (r < 0) {
@@ -1099,16 +916,4 @@ static int address_registration_receive_event(sd_event_source *s, int fd, uint32
         sd_dhcp6_client *client = ASSERT_PTR(userdata);
 
         return dhcp6_client_receive_address_registration_reply(client);
-}
-
-void dhcp6_client_set_address_registration_io(
-                sd_dhcp6_client *client,
-                const DHCP6AddressRegistrationIO *io,
-                void *userdata) {
-
-        assert(client);
-        assert(client->address_registration.fd < 0);
-
-        client->address_registration.io = io;
-        client->address_registration.io_userdata = userdata;
 }

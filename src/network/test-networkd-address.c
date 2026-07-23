@@ -133,24 +133,44 @@ TEST(dhcp6_address_registration_synchronization) {
         ASSERT_EQ(dhcp6_client_address_registration_count(client), 0U);
 }
 
-static int address_registration_open_fail(int ifindex, void *userdata) {
+int dhcp6_address_registration_open_socket(int ifindex) {
+        assert(ifindex > 0);
+
         return -EIO;
 }
 
-static uint32_t address_registration_random_u32(void *userdata) {
+int dhcp6_address_registration_send(
+                int fd,
+                const struct in6_addr *source,
+                int ifindex,
+                const struct sockaddr_in6 *destination,
+                const void *packet,
+                size_t len) {
+
+        return -EIO;
+}
+
+int dhcp6_address_registration_receive(
+                int fd,
+                void **ret_packet,
+                size_t *ret_len,
+                struct sockaddr_in6 *ret_sender,
+                struct in6_addr *ret_destination,
+                int *ret_ifindex,
+                bool *ret_truncated) {
+
+        return -EIO;
+}
+
+uint32_t dhcp6_address_registration_random_u32(void) {
         return 1;
 }
 
-static uint64_t address_registration_random_u64_range(uint64_t upper_bound, void *userdata) {
+uint64_t dhcp6_address_registration_random_u64_range(uint64_t upper_bound) {
         assert(upper_bound > 0);
+
         return 0;
 }
-
-static const DHCP6AddressRegistrationIO address_registration_failing_io = {
-        .open_socket = address_registration_open_fail,
-        .random_u32 = address_registration_random_u32,
-        .random_u64_range = address_registration_random_u64_range,
-};
 
 TEST(dhcp6_address_registration_best_effort) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
@@ -175,7 +195,6 @@ TEST(dhcp6_address_registration_best_effort) {
 
         ASSERT_OK(sd_dhcp6_client_new(&client));
         ASSERT_OK(sd_dhcp6_client_set_ifindex(client, 42));
-        dhcp6_client_set_address_registration_io(client, &address_registration_failing_io, NULL);
         ASSERT_EQ(dhcp6_client_address_registration_discover(
                           client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
         link.dhcp6_client = client;
