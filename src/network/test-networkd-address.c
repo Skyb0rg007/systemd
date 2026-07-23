@@ -7,6 +7,7 @@
 #include "dhcp6-address-registration.h"
 #include "dhcp6-internal.h"
 #include "dhcp6-protocol.h"
+#include "hashmap.h"
 #include "networkd-address.h"
 #include "networkd-dhcp6.h"
 #include "networkd-link.h"
@@ -16,6 +17,13 @@
 #include "tests.h"
 #include "time-util.h"
 #include "unaligned.h"
+
+static DHCP6AddressRegistration *test_address_registration_get(
+                sd_dhcp6_client *client,
+                const struct in6_addr *address) {
+
+        return hashmap_get(client->address_registration.registrations, address);
+}
 
 static void test_FORMAT_LIFETIME_one(usec_t lifetime, const char *expected) {
         const char *t = FORMAT_LIFETIME(lifetime);
@@ -106,7 +114,7 @@ TEST(dhcp6_address_registration_synchronization) {
         link.dhcp6_client = client;
 
         ASSERT_EQ(dhcp6_sync_address_registration(&link, &address), 1);
-        ASSERT_EQ(dhcp6_client_address_registration_count(client), 1U);
+        ASSERT_EQ(hashmap_size(client->address_registration.registrations), 1U);
 
         usec_t preferred_usec = usec_add(now(CLOCK_BOOTTIME), USEC_PER_HOUR);
         usec_t valid_usec = usec_add(now(CLOCK_BOOTTIME), 2 * USEC_PER_HOUR);
@@ -115,22 +123,22 @@ TEST(dhcp6_address_registration_synchronization) {
         ASSERT_EQ(dhcp6_sync_address_registration(&link, &address), 1);
 
         DHCP6AddressRegistration *registration = ASSERT_PTR(
-                        dhcp6_client_get_address_registration(client, &address.in_addr.in6));
+                        test_address_registration_get(client, &address.in_addr.in6));
         ASSERT_EQ(registration->lifetime_preferred_usec, preferred_usec);
         ASSERT_EQ(registration->lifetime_valid_usec, valid_usec);
 
         address.flags = IFA_F_TENTATIVE;
         ASSERT_OK(dhcp6_sync_address_registration(&link, &address));
-        ASSERT_EQ(dhcp6_client_address_registration_count(client), 0U);
+        ASSERT_EQ(hashmap_size(client->address_registration.registrations), 0U);
 
         address.flags = 0;
         ASSERT_EQ(dhcp6_sync_address_registration(&link, &address), 1);
         dhcp6_remove_address_registration(&link, &address);
-        ASSERT_EQ(dhcp6_client_address_registration_count(client), 0U);
+        ASSERT_EQ(hashmap_size(client->address_registration.registrations), 0U);
 
         network.dhcp6_register_addresses = false;
         ASSERT_OK(dhcp6_sync_address_registration(&link, &address));
-        ASSERT_EQ(dhcp6_client_address_registration_count(client), 0U);
+        ASSERT_EQ(hashmap_size(client->address_registration.registrations), 0U);
 }
 
 int dhcp6_address_registration_open_socket(int ifindex) {
@@ -203,7 +211,7 @@ TEST(dhcp6_address_registration_best_effort) {
         ASSERT_EQ(link.state, LINK_STATE_CONFIGURED);
 
         DHCP6AddressRegistration *registration = ASSERT_PTR(
-                        dhcp6_client_get_address_registration(client, &address.in_addr.in6));
+                        test_address_registration_get(client, &address.in_addr.in6));
         ASSERT_TRUE(registration->transaction_active);
         ASSERT_FALSE(registration->has_been_registered);
         ASSERT_EQ(registration->transmission_count, 0U);

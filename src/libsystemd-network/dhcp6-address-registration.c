@@ -212,15 +212,9 @@ usec_t dhcp6_address_registration_initial_retransmission_time(usec_t irt_usec, u
 }
 
 usec_t dhcp6_address_registration_next_retransmission_time(usec_t previous_usec, uint64_t random) {
-        usec_t doubled, span;
-
-        assert(previous_usec > 0);
-
-        span = previous_usec / 5;
-        assert(random <= span);
-
-        doubled = usec_add(previous_usec, previous_usec);
-        return usec_add(usec_sub_unsigned(doubled, previous_usec / 10), random);
+        return usec_add(
+                        previous_usec,
+                        dhcp6_address_registration_initial_retransmission_time(previous_usec, random));
 }
 
 usec_t dhcp6_address_registration_refresh_interval(usec_t lifetime_usec, unsigned desync_multiplier) {
@@ -240,53 +234,53 @@ usec_t dhcp6_address_registration_refresh_interval(usec_t lifetime_usec, unsigne
         return quotient * desync_multiplier + remainder;
 }
 
-static usec_t address_registration_randomized_initial_retransmission_time(sd_dhcp6_client *client) {
-        DHCP6AddressRegistrationEngine *engine;
-        usec_t span;
+static usec_t address_registration_randomized_retransmission_time(
+                usec_t base_usec,
+                bool initial) {
 
-        assert(client);
+        uint64_t random;
 
-        engine = &client->address_registration;
-        span = engine->initial_retransmission_time_usec / 5;
-        return dhcp6_address_registration_initial_retransmission_time(
-                        engine->initial_retransmission_time_usec,
-                        dhcp6_address_registration_random_u64_range(span + 1));
+        random = dhcp6_address_registration_random_u64_range(base_usec / 5 + 1);
+        return initial ?
+                dhcp6_address_registration_initial_retransmission_time(base_usec, random) :
+                dhcp6_address_registration_next_retransmission_time(base_usec, random);
 }
 
-static usec_t address_registration_randomized_next_retransmission_time(
-                sd_dhcp6_client *client,
-                usec_t previous_usec) {
+static int address_registration_schedule_timer(
+                DHCP6AddressRegistration *registration,
+                usec_t deadline_usec,
+                bool refresh) {
 
-        usec_t span;
-
-        assert(client);
-
-        span = previous_usec / 5;
-        return dhcp6_address_registration_next_retransmission_time(
-                        previous_usec,
-                        dhcp6_address_registration_random_u64_range(span + 1));
-}
-
-static int address_registration_arm_retransmission(DHCP6AddressRegistration *registration) {
-
+        sd_event_source **event;
         sd_dhcp6_client *client;
+        sd_event_time_handler_t handler;
+        const char *description;
+        usec_t *stored_deadline_usec;
 
         assert(registration);
 
         client = ASSERT_PTR(registration->client);
-        if (!client->event || registration->retransmit_deadline_usec == USEC_INFINITY)
+        event = refresh ? &registration->refresh_event : &registration->retransmit_event;
+        stored_deadline_usec = refresh ? &registration->refresh_deadline_usec :
+                                        &registration->retransmit_deadline_usec;
+        handler = refresh ? address_registration_refresh_event : address_registration_retransmit_event;
+        description = refresh ? "dhcp6-address-registration-refresh" :
+                                "dhcp6-address-registration-retransmit";
+
+        *stored_deadline_usec = deadline_usec;
+        if (!client->event || deadline_usec == USEC_INFINITY)
                 return 0;
 
         return event_reset_time(
                         client->event,
-                        &registration->retransmit_event,
+                        event,
                         CLOCK_BOOTTIME,
-                        registration->retransmit_deadline_usec,
+                        deadline_usec,
                         0,
-                        address_registration_retransmit_event,
+                        handler,
                         registration,
                         client->event_priority,
-                        "dhcp6-address-registration-retransmit",
+                        description,
                         true);
 }
 
@@ -294,46 +288,19 @@ static int address_registration_schedule_retransmission(
                 DHCP6AddressRegistration *registration,
                 usec_t now_usec) {
 
-        assert(registration);
-
-        registration->retransmit_deadline_usec = usec_add(now_usec, registration->retransmit_time_usec);
-
-        return address_registration_arm_retransmission(registration);
-}
-
-static int address_registration_arm_refresh(DHCP6AddressRegistration *registration) {
-
-        sd_dhcp6_client *client;
-
-        assert(registration);
-
-        client = ASSERT_PTR(registration->client);
-        if (!client->event || registration->refresh_deadline_usec == USEC_INFINITY)
-                return 0;
-
-        return event_reset_time(
-                        client->event,
-                        &registration->refresh_event,
-                        CLOCK_BOOTTIME,
-                        registration->refresh_deadline_usec,
-                        0,
-                        address_registration_refresh_event,
+        return address_registration_schedule_timer(
                         registration,
-                        client->event_priority,
-                        "dhcp6-address-registration-refresh",
-                        true);
+                        usec_add(now_usec, registration->retransmit_time_usec),
+                        /* refresh= */ false);
 }
 
 static int address_registration_schedule_refresh(
                 DHCP6AddressRegistration *registration,
                 usec_t deadline_usec) {
 
-        assert(registration);
         assert(deadline_usec != USEC_INFINITY);
 
-        registration->refresh_deadline_usec = deadline_usec;
-
-        return address_registration_arm_refresh(registration);
+        return address_registration_schedule_timer(registration, deadline_usec, /* refresh= */ true);
 }
 
 static int address_registration_set_next_refresh(
@@ -367,6 +334,40 @@ static int address_registration_set_next_refresh(
         return 0;
 }
 
+static int address_registration_transmit(
+                DHCP6AddressRegistration *registration,
+                usec_t now_usec,
+                bool retransmission) {
+
+        int r, q, refresh_r = 0;
+
+        assert(registration);
+
+        r = address_registration_send_message(registration, now_usec);
+        if (r >= 0) {
+                registration->transmission_count++;
+                registration->has_been_registered = true;
+                refresh_r = registration->transmission_count == 1 ?
+                                address_registration_set_next_refresh(registration, now_usec) :
+                                address_registration_schedule_timer(
+                                        registration,
+                                        registration->refresh_deadline_usec,
+                                        /* refresh= */ true);
+        }
+
+        if (retransmission)
+                registration->retransmit_time_usec = address_registration_randomized_retransmission_time(
+                                registration->retransmit_time_usec, /* initial= */ false);
+
+        q = address_registration_schedule_retransmission(registration, now_usec);
+        if (q < 0)
+                return q;
+        if (refresh_r < 0)
+                return refresh_r;
+
+        return r < 0 ? r : retransmission;
+}
+
 static int address_registration_start_transaction(
                 DHCP6AddressRegistration *registration,
                 usec_t now_usec) {
@@ -374,7 +375,6 @@ static int address_registration_start_transaction(
         sd_dhcp6_client *client;
         be32_t previous_transaction_id;
         uint32_t transaction_id;
-        int r, q, refresh_r = 0;
 
         assert(registration);
 
@@ -392,38 +392,12 @@ static int address_registration_start_transaction(
                 transaction_id = (transaction_id + 1) & 0x00ffffffU;
         registration->transaction_id = htobe32(transaction_id);
         registration->transmission_count = 0;
-        registration->retransmit_time_usec =
-                address_registration_randomized_initial_retransmission_time(client);
+        registration->retransmit_time_usec = address_registration_randomized_retransmission_time(
+                        client->address_registration.initial_retransmission_time_usec,
+                        /* initial= */ true);
         registration->transaction_active = true;
 
-        r = address_registration_send_message(registration, now_usec);
-        if (r >= 0) {
-                registration->transmission_count++;
-                registration->has_been_registered = true;
-                refresh_r = address_registration_set_next_refresh(registration, now_usec);
-        }
-
-        q = address_registration_schedule_retransmission(registration, now_usec);
-        if (q < 0)
-                return q;
-
-        return refresh_r < 0 ? refresh_r : r;
-}
-
-DHCP6AddressRegistration *dhcp6_client_get_address_registration(
-                sd_dhcp6_client *client,
-                const struct in6_addr *address) {
-
-        assert(client);
-        assert(address);
-
-        return hashmap_get(client->address_registration.registrations, address);
-}
-
-size_t dhcp6_client_address_registration_count(sd_dhcp6_client *client) {
-        assert(client);
-
-        return hashmap_size(client->address_registration.registrations);
+        return address_registration_transmit(registration, now_usec, /* retransmission= */ false);
 }
 
 int dhcp6_client_update_address_registration_at(
@@ -446,7 +420,7 @@ int dhcp6_client_update_address_registration_at(
                 return 0;
         }
 
-        registration = dhcp6_client_get_address_registration(client, address);
+        registration = hashmap_get(client->address_registration.registrations, address);
         if (!registration) {
                 allocated = new(DHCP6AddressRegistration, 1);
                 if (!allocated)
@@ -677,11 +651,17 @@ int dhcp6_client_address_registration_attach_event(sd_dhcp6_client *client) {
                 goto fail;
 
         HASHMAP_FOREACH(registration, client->address_registration.registrations) {
-                r = address_registration_arm_retransmission(registration);
+                r = address_registration_schedule_timer(
+                                registration,
+                                registration->retransmit_deadline_usec,
+                                /* refresh= */ false);
                 if (r < 0)
                         goto fail;
 
-                r = address_registration_arm_refresh(registration);
+                r = address_registration_schedule_timer(
+                                registration,
+                                registration->refresh_deadline_usec,
+                                /* refresh= */ true);
                 if (r < 0)
                         goto fail;
         }
@@ -713,12 +693,11 @@ int dhcp6_client_address_registration_retransmit_at(
                 usec_t now_usec) {
 
         DHCP6AddressRegistration *registration;
-        int r, refresh_r = 0;
 
         assert(client);
         assert(address);
 
-        registration = dhcp6_client_get_address_registration(client, address);
+        registration = hashmap_get(client->address_registration.registrations, address);
         if (!registration || !registration->transaction_active)
                 return 0;
 
@@ -733,27 +712,7 @@ int dhcp6_client_address_registration_retransmit_at(
                 return 0;
         }
 
-        r = address_registration_send_message(registration, now_usec);
-        if (r >= 0) {
-                registration->transmission_count++;
-                registration->has_been_registered = true;
-                if (registration->transmission_count == 1)
-                        refresh_r = address_registration_set_next_refresh(registration, now_usec);
-                else
-                        refresh_r = address_registration_arm_refresh(registration);
-        }
-
-        registration->retransmit_time_usec = address_registration_randomized_next_retransmission_time(
-                        client, registration->retransmit_time_usec);
-
-        int q = address_registration_schedule_retransmission(registration, now_usec);
-        if (q < 0)
-                return q;
-
-        if (refresh_r < 0)
-                return refresh_r;
-
-        return r < 0 ? r : 1;
+        return address_registration_transmit(registration, now_usec, /* retransmission= */ true);
 }
 
 static int address_registration_retransmit_event(sd_event_source *s, uint64_t usec, void *userdata) {
@@ -780,7 +739,7 @@ int dhcp6_client_address_registration_refresh_at(
         assert(client);
         assert(address);
 
-        registration = dhcp6_client_get_address_registration(client, address);
+        registration = hashmap_get(client->address_registration.registrations, address);
         if (!registration || registration->refresh_deadline_usec == USEC_INFINITY)
                 return 0;
         if (now_usec < registration->refresh_deadline_usec)
@@ -832,7 +791,7 @@ int dhcp6_client_process_address_registration_reply_at(
         if (ifindex != client->ifindex)
                 return 0;
 
-        registration = dhcp6_client_get_address_registration(client, destination);
+        registration = hashmap_get(client->address_registration.registrations, destination);
         if (!registration || !registration->transaction_active)
                 return 0;
         if (registration->lifetime_valid_usec != USEC_INFINITY &&

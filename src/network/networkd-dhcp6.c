@@ -1029,12 +1029,10 @@ int config_parse_dhcp6_address_registration_time(
                 return 0;
         }
 
-        r = parse_sec(rvalue, &value);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to parse %s=, ignoring assignment: %s", lvalue, rvalue);
-                return 0;
-        }
+        r = config_parse_sec(
+                        unit, filename, line, section, section_line, lvalue, ltype, rvalue, &value, userdata);
+        if (r <= 0)
+                return r;
 
         if (!timestamp_is_set(value)) {
                 log_syntax(unit, LOG_WARNING, filename, line, 0,
@@ -1044,7 +1042,7 @@ int config_parse_dhcp6_address_registration_time(
         }
 
         *usec = value;
-        return 0;
+        return 1;
 }
 
 int config_parse_dhcp6_pd_prefix_hint(

@@ -126,11 +126,6 @@ int dhcp6_client_process_address_registration_reply_at(
                 usec_t now_usec);
 int dhcp6_client_receive_address_registration_reply(sd_dhcp6_client *client);
 
-DHCP6AddressRegistration *dhcp6_client_get_address_registration(
-                sd_dhcp6_client *client,
-                const struct in6_addr *address);
-size_t dhcp6_client_address_registration_count(sd_dhcp6_client *client);
-
 usec_t dhcp6_address_registration_initial_retransmission_time(usec_t irt_usec, uint64_t random);
 usec_t dhcp6_address_registration_next_retransmission_time(usec_t previous_usec, uint64_t random);
 usec_t dhcp6_address_registration_refresh_interval(usec_t lifetime_usec, unsigned desync_multiplier);
