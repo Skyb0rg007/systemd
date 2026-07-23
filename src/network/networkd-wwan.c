@@ -422,30 +422,6 @@ static int link_request_bearer_route(
         return 0;
 }
 
-int link_update_wwan_attachment(Link *link, Bearer *b) {
-        bool had_state;
-
-        assert(link);
-        assert(b);
-
-        if (b->attachment_state_set && b->attachment_connected == b->connected)
-                return 0;
-
-        had_state = b->attachment_state_set;
-        b->attachment_state_set = true;
-        b->attachment_connected = b->connected;
-
-        /* A newly activated bearer, disconnect, or reconnect is a new RFC 9686 link attachment. */
-        if (b->connected) {
-                int r = dhcp6_restart_on_new_attachment(link);
-                if (r < 0)
-                        return r;
-        } else if (had_state)
-                dhcp6_reset_address_registration(link);
-
-        return 1;
-}
-
 static int link_apply_bearer_impl(Link *link, Bearer *b) {
         Address *address;
         Route *route;
@@ -455,12 +431,6 @@ static int link_apply_bearer_impl(Link *link, Bearer *b) {
 
         if (!IN_SET(link->state, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED))
                 return 0;
-
-        if (b) {
-                r = link_update_wwan_attachment(link, b);
-                if (r < 0)
-                        return r;
-        }
 
         /* First, mark bearer configs. */
         SET_FOREACH(address, link->addresses) {

@@ -33,8 +33,6 @@ typedef struct Bearer {
         uint32_t ip6_mtu;
 
         bool connected;                 /* Connected property */
-        bool attachment_state_set;
-        bool attachment_connected;
 } Bearer;
 
 typedef struct Modem {
@@ -67,7 +65,6 @@ int bearer_get_by_path(Manager *manager, const char *path, Modem **ret_modem, Be
 int link_get_bearer(Link *link, Bearer **ret);
 
 int link_dhcp_enabled_by_bearer(Link *link, int family);
-int link_update_wwan_attachment(Link *link, Bearer *b);
 
 int link_apply_bearer(Link *link);
 int bearer_update_link(Bearer *b);

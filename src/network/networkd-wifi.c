@@ -7,7 +7,6 @@
 
 #include "alloc-util.h"
 #include "ether-addr-util.h"
-#include "networkd-dhcp6.h"
 #include "networkd-link.h"
 #include "networkd-manager.h"
 #include "networkd-wifi.h"
@@ -15,32 +14,6 @@
 #include "set.h"
 #include "string-util.h"
 #include "wifi-util.h"
-
-int link_update_wifi_bssid(Link *link, const struct ether_addr *bssid) {
-        assert(link);
-        assert(bssid);
-
-        if (ether_addr_equal(&link->bssid, bssid))
-                return 0;
-
-        link->bssid = *bssid;
-
-        if (link->wlan_iftype == NL80211_IFTYPE_STATION) {
-                int r = dhcp6_restart_on_new_attachment(link);
-                if (r < 0)
-                        return r;
-        }
-
-        return 1;
-}
-
-void link_clear_wifi_bssid(Link *link) {
-        assert(link);
-
-        if (link->wlan_iftype == NL80211_IFTYPE_STATION)
-                dhcp6_reset_address_registration(link);
-        link->bssid = ETHER_ADDR_NULL;
-}
 
 int link_get_wlan_interface(Link *link) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL, *reply = NULL;
@@ -262,13 +235,11 @@ int manager_genl_process_nl80211_mlme(sd_netlink *genl, sd_netlink_message *mess
                                strna(nl80211_cmd_to_string(cmd)), cmd, ETHER_ADDR_TO_STR(&bssid));
 
                 if (cmd == NL80211_CMD_DEL_STATION) {
-                        link_clear_wifi_bssid(link);
+                        link->bssid = ETHER_ADDR_NULL;
                         return 0;
                 }
 
-                r = link_update_wifi_bssid(link, &bssid);
-                if (r < 0)
-                        return log_link_warning_errno(link, r, "Failed to restart DHCPv6 client: %m");
+                link->bssid = bssid;
 
                 if (manager->enumerating &&
                     link->wlan_iftype == NL80211_IFTYPE_STATION && link->ssid)
@@ -277,7 +248,7 @@ int manager_genl_process_nl80211_mlme(sd_netlink *genl, sd_netlink_message *mess
                 break;
         }
         case NL80211_CMD_CONNECT: {
-                struct ether_addr bssid = ETHER_ADDR_NULL;
+                struct ether_addr bssid;
                 uint16_t status_code;
 
                 r = sd_netlink_message_read_ether_addr(message, NL80211_ATTR_MAC, &bssid);
@@ -300,12 +271,7 @@ int manager_genl_process_nl80211_mlme(sd_netlink *genl, sd_netlink_message *mess
                 if (status_code != 0)
                         return 0;
 
-                r = link_update_wifi_bssid(link, &bssid);
-                if (r < 0) {
-                        log_link_warning_errno(link, r, "Failed to restart DHCPv6 client: %m");
-                        link_enter_failed(link);
-                        return 0;
-                }
+                link->bssid = bssid;
 
                 if (!manager->enumerating) {
                         r = link_get_wlan_interface(link);
@@ -333,32 +299,11 @@ int manager_genl_process_nl80211_mlme(sd_netlink *genl, sd_netlink_message *mess
                 }
                 break;
         }
-        case NL80211_CMD_ROAM: {
-                struct ether_addr bssid;
-
-                r = sd_netlink_message_read_ether_addr(message, NL80211_ATTR_MAC, &bssid);
-                if (r < 0) {
-                        log_link_debug_errno(link, r, "nl80211: received %s(%u) message without valid BSSID, ignoring: %m",
-                                             strna(nl80211_cmd_to_string(cmd)), cmd);
-                        return 0;
-                }
-
-                log_link_debug(link, "nl80211: received %s(%u) message: bssid=%s",
-                               strna(nl80211_cmd_to_string(cmd)), cmd, ETHER_ADDR_TO_STR(&bssid));
-
-                r = link_update_wifi_bssid(link, &bssid);
-                if (r < 0) {
-                        log_link_warning_errno(link, r, "Failed to restart DHCPv6 client: %m");
-                        link_enter_failed(link);
-                        return 0;
-                }
-                break;
-        }
         case NL80211_CMD_DISCONNECT:
                 log_link_debug(link, "nl80211: received %s(%u) message.",
                                strna(nl80211_cmd_to_string(cmd)), cmd);
 
-                link_clear_wifi_bssid(link);
+                link->bssid = ETHER_ADDR_NULL;
                 free_and_replace(link->previous_ssid, link->ssid);
                 break;
 

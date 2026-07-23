@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <linux/if_addr.h>
-#include <linux/nl80211.h>
 #include <linux/rtnetlink.h>
 
 #include "dhcp6-address-registration.h"
@@ -12,8 +11,6 @@
 #include "networkd-dhcp6.h"
 #include "networkd-link.h"
 #include "networkd-network.h"
-#include "networkd-wifi.h"
-#include "networkd-wwan.h"
 #include "tests.h"
 #include "time-util.h"
 
@@ -214,88 +211,6 @@ TEST(dhcp6_address_registration_best_effort) {
         ASSERT_TRUE(registration->transaction_active);
         ASSERT_FALSE(registration->has_been_registered);
         ASSERT_EQ(registration->transmission_count, 0U);
-}
-
-static int address_registration_defer_handler(sd_event_source *s, void *userdata) {
-        return 0;
-}
-
-TEST(dhcp6_address_registration_attachment_boundaries) {
-        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
-        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
-        const struct ether_addr bssid1 = { .ether_addr_octet = { 0, 1, 2, 3, 4, 5 } };
-        const struct ether_addr bssid2 = { .ether_addr_octet = { 0, 1, 2, 3, 4, 6 } };
-        Link link = {
-                .wlan_iftype = NL80211_IFTYPE_STATION,
-        };
-        Bearer bearer = {
-                .connected = true,
-        };
-        int enabled;
-
-        ASSERT_OK(sd_event_new(&event));
-        ASSERT_OK(sd_dhcp6_client_new(&client));
-        ASSERT_OK(sd_dhcp6_client_attach_event(client, event, 0));
-        ASSERT_OK(dhcp6_client_set_address_registration_parameters(
-                          client,
-                          /* enabled= */ true,
-                          DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT,
-                          DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC,
-                          DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL));
-        ASSERT_OK(sd_event_add_defer(
-                          event, &client->receive_message, address_registration_defer_handler, NULL));
-        client->information_request = true;
-        client->state = DHCP6_STATE_INFORMATION_REQUEST;
-        link.dhcp6_client = client;
-
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        ASSERT_EQ(link_update_wifi_bssid(&link, &bssid1), 1);
-        ASSERT_FALSE(client->address_registration.supported);
-        ASSERT_EQ(client->state, DHCP6_STATE_INFORMATION_REQUEST);
-        ASSERT_NOT_NULL(client->timeout_resend);
-        ASSERT_OK(sd_event_source_get_enabled(client->timeout_resend, &enabled));
-        ASSERT_EQ(enabled, SD_EVENT_ONESHOT);
-
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        ASSERT_OK(link_update_wifi_bssid(&link, &bssid1));
-        ASSERT_TRUE(client->address_registration.supported);
-
-        ASSERT_EQ(link_update_wifi_bssid(&link, &bssid2), 1);
-        ASSERT_FALSE(client->address_registration.supported);
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        link_clear_wifi_bssid(&link);
-        ASSERT_FALSE(client->address_registration.supported);
-
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        ASSERT_EQ(link_update_wwan_attachment(&link, &bearer), 1);
-        ASSERT_FALSE(client->address_registration.supported);
-
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        ASSERT_OK(link_update_wwan_attachment(&link, &bearer));
-        ASSERT_TRUE(client->address_registration.supported);
-
-        bearer.connected = false;
-        ASSERT_EQ(link_update_wwan_attachment(&link, &bearer), 1);
-        ASSERT_FALSE(client->address_registration.supported);
-
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        bearer.connected = true;
-        ASSERT_EQ(link_update_wwan_attachment(&link, &bearer), 1);
-        ASSERT_FALSE(client->address_registration.supported);
-
-        ASSERT_EQ(dhcp6_client_address_registration_discover(
-                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);
-        Bearer replacement = {
-                .connected = true,
-        };
-        ASSERT_EQ(link_update_wwan_attachment(&link, &replacement), 1);
-        ASSERT_FALSE(client->address_registration.supported);
 }
 
 DEFINE_TEST_MAIN(LOG_DEBUG);

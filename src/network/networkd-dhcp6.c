@@ -102,19 +102,6 @@ void dhcp6_reset_address_registration(Link *link) {
                 dhcp6_client_address_registration_reset(link->dhcp6_client);
 }
 
-int dhcp6_restart_on_new_attachment(Link *link) {
-        assert(link);
-
-        dhcp6_reset_address_registration(link);
-
-        if (!link->dhcp6_client)
-                return 0;
-
-        log_link_debug(link, "Restarting DHCPv6 client on new link attachment.");
-
-        return dhcp6_client_restart(link->dhcp6_client);
-}
-
 static DHCP6ClientStartMode link_get_dhcp6_client_start_mode(Link *link) {
         assert(link);
 

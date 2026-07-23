@@ -23,7 +23,6 @@ bool dhcp6_address_is_eligible_for_registration(const Address *address);
 int dhcp6_sync_address_registration(Link *link, const Address *address);
 void dhcp6_remove_address_registration(Link *link, const Address *address);
 void dhcp6_reset_address_registration(Link *link);
-int dhcp6_restart_on_new_attachment(Link *link);
 int dhcp6_check_ready(Link *link);
 int dhcp6_update_mac(Link *link);
 int dhcp6_start(Link *link);
