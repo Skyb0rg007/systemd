@@ -478,6 +478,11 @@ void link_enter_failed(Link *link) {
                 return;
 
 stop:
+        /* Reconfiguration was refused, so the engines stay stopped without being freed. Carrier loss will
+         * not clean up after them either, as it bails out for links in the failed state. Give up address
+         * registration here, rather than leave its socket and timers running on an abandoned link. */
+        dhcp6_reset_address_registration(link);
+
         (void) link_stop_engines(link, /* may_keep_dynamic= */ false);
 }
 
@@ -1881,8 +1886,18 @@ static int link_carrier_gained(Link *link) {
          *
          * For non-wireless interfaces, we have no way to detect the connected network change. So,
          * we do not set any flags here. Note, both ssid and previous_ssid are NULL in that case. */
-        if (link->previous_ssid && !streq_ptr(link->previous_ssid, link->ssid))
+        if (link->previous_ssid && !streq_ptr(link->previous_ssid, link->ssid)) {
                 flags |= LINK_RECONFIGURE_UNCONDITIONALLY | LINK_RECONFIGURE_CLEANLY;
+
+                /* A different SSID is a different link, so RFC 9686 section 4.4 requires address
+                 * registration support to be rediscovered from scratch here, without any prior knowledge.
+                 * Carrier loss normally does that already, but link_carrier_lost() suppresses the whole
+                 * lifecycle when IgnoreCarrierLoss= is infinite -- which ConfigureWithoutCarrier=yes and
+                 * ActivationPolicy=always-up both imply. Neither does the reconfiguration below
+                 * necessarily destroy the client and its registrations with it: if one .network file
+                 * matches both SSIDs and asks for KeepConfiguration=dynamic, the client is kept as is. */
+                dhcp6_reset_address_registration(link);
+        }
         link->previous_ssid = mfree(link->previous_ssid);
 
         /* AP and P2P-GO interfaces may have a new SSID - update the link properties in case a new .network
@@ -1932,6 +1947,8 @@ static int link_carrier_lost_impl(Link *link) {
 
         if (!link->network)
                 return ret;
+
+        dhcp6_reset_address_registration(link);
 
         RET_GATHER(ret, link_stop_engines(link, /* may_keep_dynamic= */ false));
         RET_GATHER(ret, link_drop_static_config(link));

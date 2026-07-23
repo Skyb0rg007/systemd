@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+[Match]
+Name=addr-reg-client*
+
+[Network]
+DHCP=ipv6
+IPv6AcceptRA=no
+LinkLocalAddressing=ipv6
+Address=2001:db8:9686::10/64
+
+[DHCPv6]
+WithoutRA=information-request
+AddressRegistrationInitialRetransmissionTimeSec=200ms
+AddressRegistrationMaxRetransmissions=1
+StaticAddressRegistrationRefreshIntervalSec=2s

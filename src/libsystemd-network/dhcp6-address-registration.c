@@ -583,6 +583,14 @@ int dhcp6_client_address_registration_discover_at(
 
         assert(client);
 
+        /* RFC 9686 section 4.2 says the client SHOULD NOT register unless it has seen a Router
+         * Advertisement with the M or O flag set. Nothing is checked here, because having processed an
+         * Advertise or Reply that carries the option already implies a DHCPv6 exchange took place: with
+         * IPv6AcceptRA= enabled, such an RA is what started the client in the first place. What it does not
+         * cover is WithoutRA=, where the administrator asked for DHCPv6 with no RA at all -- a deliberate
+         * departure from a SHOULD NOT, documented under RegisterAddresses= and disabled by the same
+         * setting. */
+
         if (!IN_SET(message_type, DHCP6_MESSAGE_ADVERTISE, DHCP6_MESSAGE_REPLY))
                 return 0;
         if (!client->address_registration.enabled || !advertised || client->address_registration.supported)
