@@ -12,6 +12,11 @@
 
 #define DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT (1 * USEC_PER_SEC)
 #define DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC 3U
+#define DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL (4 * USEC_PER_HOUR)
+
+#define DHCP6_ADDRESS_REGISTRATION_DESYNC_SCALE 1000000U
+#define DHCP6_ADDRESS_REGISTRATION_DESYNC_MIN 900000U
+#define DHCP6_ADDRESS_REGISTRATION_DESYNC_MAX 1100000U
 
 typedef struct DHCP6AddressRegistration DHCP6AddressRegistration;
 
@@ -45,10 +50,14 @@ struct DHCP6AddressRegistration {
         usec_t lifetime_valid_usec;
 
         sd_event_source *retransmit_event;
+        sd_event_source *refresh_event;
         be32_t transaction_id;
         unsigned transmission_count;
         usec_t retransmit_time_usec;
         usec_t retransmit_deadline_usec;
+        usec_t lifetime_valid_reference_usec;
+        usec_t next_refresh_usec;
+        usec_t refresh_deadline_usec;
         bool transaction_active;
         bool has_been_registered;
 };
@@ -63,16 +72,28 @@ typedef struct DHCP6AddressRegistrationEngine {
 
         usec_t initial_retransmission_time_usec;
         unsigned max_retransmissions;
+        usec_t static_refresh_interval_usec;
+        unsigned desync_multiplier;
 
         const DHCP6AddressRegistrationIO *io;
         void *io_userdata;
 } DHCP6AddressRegistrationEngine;
 
-int dhcp6_client_set_address_registration_enabled(sd_dhcp6_client *client, bool enabled);
+int dhcp6_client_set_address_registration_parameters(
+                sd_dhcp6_client *client,
+                bool enabled,
+                usec_t initial_retransmission_time_usec,
+                unsigned max_retransmissions,
+                usec_t static_refresh_interval_usec);
 int dhcp6_client_address_registration_discover(
                 sd_dhcp6_client *client,
                 uint8_t message_type,
                 bool advertised);
+int dhcp6_client_address_registration_discover_at(
+                sd_dhcp6_client *client,
+                uint8_t message_type,
+                bool advertised,
+                usec_t now_usec);
 void dhcp6_client_address_registration_reset(sd_dhcp6_client *client);
 void dhcp6_client_address_registration_done(sd_dhcp6_client *client);
 int dhcp6_client_address_registration_attach_event(sd_dhcp6_client *client);
@@ -94,6 +115,10 @@ void dhcp6_client_remove_address_registration(
                 const struct in6_addr *address);
 
 int dhcp6_client_address_registration_retransmit_at(
+                sd_dhcp6_client *client,
+                const struct in6_addr *address,
+                usec_t now_usec);
+int dhcp6_client_address_registration_refresh_at(
                 sd_dhcp6_client *client,
                 const struct in6_addr *address,
                 usec_t now_usec);
@@ -119,3 +144,4 @@ void dhcp6_client_set_address_registration_io(
 
 usec_t dhcp6_address_registration_initial_retransmission_time(usec_t irt_usec, uint64_t random);
 usec_t dhcp6_address_registration_next_retransmission_time(usec_t previous_usec, uint64_t random);
+usec_t dhcp6_address_registration_refresh_interval(usec_t lifetime_usec, unsigned desync_multiplier);
