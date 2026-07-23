@@ -1507,6 +1507,48 @@ TEST(address_registration_network_failures) {
         }
 }
 
+TEST(address_registration_timer_failure) {
+        AddressRegistrationTest test = {
+                .next_transaction_id = 0x123456,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
+                test_address_registration_client_new(&test);
+        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
+        const usec_t now_usec = now(CLOCK_BOOTTIME);
+
+        ASSERT_OK(sd_event_new(&event));
+        ASSERT_OK(sd_dhcp6_client_attach_event(client, event, 0));
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client, &ia_na_address1, USEC_INFINITY, USEC_INFINITY, now_usec), 1);
+
+        DHCP6AddressRegistration *registration = ASSERT_PTR(
+                        test_address_registration_get(client, &ia_na_address1));
+
+        ASSERT_OK(sd_event_add_time(
+                          event,
+                          &registration->retransmit_event,
+                          CLOCK_MONOTONIC,
+                          USEC_INFINITY,
+                          0,
+                          /* callback= */ NULL,
+                          /* userdata= */ NULL));
+
+        ASSERT_ERROR(dhcp6_client_address_registration_discover(
+                             client, DHCP6_MESSAGE_ADVERTISE, /* advertised= */ true), EINVAL);
+        ASSERT_FALSE(registration->transaction_active);
+        ASSERT_EQ(registration->retransmit_deadline_usec, USEC_INFINITY);
+        ASSERT_EQ(sd_event_source_get_enabled(registration->retransmit_event, /* ret= */ NULL), 0);
+        ASSERT_EQ(test.n_send_attempts, 0U);
+
+        registration->retransmit_event = sd_event_source_unref(registration->retransmit_event);
+
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client, &ia_na_address1, USEC_INFINITY, USEC_INFINITY, now_usec), 1);
+        ASSERT_TRUE(registration->transaction_active);
+        ASSERT_NOT_NULL(registration->retransmit_event);
+        ASSERT_EQ(test.n_sent, 1U);
+}
+
 TEST(address_registration_event_migration) {
         AddressRegistrationTest test = {
                 .next_transaction_id = 0x123456,

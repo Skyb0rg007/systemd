@@ -339,9 +339,19 @@ static int address_registration_transmit(
                 usec_t now_usec,
                 bool retransmission) {
 
-        int r, q, refresh_r = 0;
+        int r, refresh_r = 0;
 
         assert(registration);
+
+        if (retransmission)
+                registration->retransmit_time_usec = address_registration_randomized_retransmission_time(
+                                registration->retransmit_time_usec, /* initial= */ false);
+
+        r = address_registration_schedule_retransmission(registration, now_usec);
+        if (r < 0) {
+                address_registration_cancel_transaction(registration);
+                return r;
+        }
 
         r = address_registration_send_message(registration, now_usec);
         if (r >= 0) {
@@ -355,13 +365,6 @@ static int address_registration_transmit(
                                         /* refresh= */ true);
         }
 
-        if (retransmission)
-                registration->retransmit_time_usec = address_registration_randomized_retransmission_time(
-                                registration->retransmit_time_usec, /* initial= */ false);
-
-        q = address_registration_schedule_retransmission(registration, now_usec);
-        if (q < 0)
-                return q;
         if (refresh_r < 0)
                 return refresh_r;
 
@@ -715,6 +718,23 @@ int dhcp6_client_address_registration_retransmit_at(
         return address_registration_transmit(registration, now_usec, /* retransmission= */ true);
 }
 
+static void address_registration_log_transaction_error(
+                DHCP6AddressRegistration *registration,
+                int error,
+                const char *operation) {
+
+        assert(registration);
+        assert(operation);
+
+        log_dhcp6_client_errno(
+                        registration->client,
+                        error,
+                        "Failed to %s address registration for %s%s: %m",
+                        operation,
+                        IN6_ADDR_TO_STRING(&registration->address),
+                        registration->transaction_active ? ", retrying" : ", transaction stopped");
+}
+
 static int address_registration_retransmit_event(sd_event_source *s, uint64_t usec, void *userdata) {
         DHCP6AddressRegistration *registration = ASSERT_PTR(userdata);
         int r;
@@ -722,9 +742,7 @@ static int address_registration_retransmit_event(sd_event_source *s, uint64_t us
         r = dhcp6_client_address_registration_retransmit_at(
                         ASSERT_PTR(registration->client), &registration->address, now(CLOCK_BOOTTIME));
         if (r < 0)
-                log_dhcp6_client_errno(registration->client, r,
-                                       "Failed to retransmit address registration for %s, retrying: %m",
-                                       IN6_ADDR_TO_STRING(&registration->address));
+                address_registration_log_transaction_error(registration, r, "retransmit");
 
         return 0;
 }
@@ -760,9 +778,7 @@ static int address_registration_refresh_event(sd_event_source *s, uint64_t usec,
         r = dhcp6_client_address_registration_refresh_at(
                         ASSERT_PTR(registration->client), &registration->address, now(CLOCK_BOOTTIME));
         if (r < 0)
-                log_dhcp6_client_errno(registration->client, r,
-                                       "Failed to refresh address registration for %s, retrying: %m",
-                                       IN6_ADDR_TO_STRING(&registration->address));
+                address_registration_log_transaction_error(registration, r, "refresh");
 
         return 0;
 }
