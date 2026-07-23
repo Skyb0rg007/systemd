@@ -15,6 +15,7 @@
 
 #include "dhcp6-internal.h"
 #include "dhcp6-lease-internal.h"
+#include "dhcp6-option.h"
 #include "dhcp6-protocol.h"
 #include "fd-util.h"
 #include "in-addr-util.h"
@@ -400,6 +401,52 @@ TEST(option_status) {
         assert_se(!ia);
 }
 
+static void test_client_append_oro_one(DHCP6State state, bool enabled, size_t n_automatic_options) {
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
+        _cleanup_free_ uint8_t *buf = NULL;
+        size_t offset = 0, option_offset = 0, optlen;
+        const uint8_t *optval;
+        unsigned n_address_registration = 0;
+        uint16_t optcode;
+
+        ASSERT_OK(sd_dhcp6_client_new(&client));
+        ASSERT_OK(dhcp6_client_set_address_registration_enabled(client, enabled));
+        ASSERT_OK(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DNS_SERVER));
+        ASSERT_OK(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_ADDR_REG_ENABLE));
+
+        client->state = state;
+
+        ASSERT_NOT_NULL(buf = new0(uint8_t, 1));
+        ASSERT_OK(dhcp6_client_append_oro(client, &buf, &offset));
+        ASSERT_OK(dhcp6_option_parse(buf, offset, &option_offset, &optcode, &optlen, &optval));
+        ASSERT_EQ(optcode, SD_DHCP6_OPTION_ORO);
+        ASSERT_EQ(optlen, (1 + n_automatic_options + enabled) * sizeof(be16_t));
+        ASSERT_EQ(option_offset, offset);
+
+        for (size_t i = 0; i < optlen / sizeof(be16_t); i++)
+                if (unaligned_read_be16(optval + i * sizeof(be16_t)) == SD_DHCP6_OPTION_ADDR_REG_ENABLE)
+                        n_address_registration++;
+
+        ASSERT_EQ(n_address_registration, enabled);
+}
+
+TEST(client_append_oro_address_registration) {
+        DHCP6State state;
+
+        FOREACH_ARGUMENT(state,
+                         DHCP6_STATE_INFORMATION_REQUEST,
+                         DHCP6_STATE_SOLICITATION,
+                         DHCP6_STATE_REQUEST,
+                         DHCP6_STATE_RENEW,
+                         DHCP6_STATE_REBIND)
+                for (unsigned enabled = 0; enabled <= 1; enabled++)
+                        test_client_append_oro_one(
+                                        state,
+                                        enabled,
+                                        state == DHCP6_STATE_INFORMATION_REQUEST ? 2 :
+                                        state == DHCP6_STATE_SOLICITATION ? 1 : 0);
+}
+
 TEST(client_parse_message_issue_22099) {
         static const uint8_t msg[] = {
                 /* Message type */
@@ -518,13 +565,14 @@ static const uint8_t msg_information_request[] = {
         0x0f, 0xb4, 0xe5,
         /* MUD URL */
         /* ORO */
-        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0c,
+        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0e,
         0x00, SD_DHCP6_OPTION_DNS_SERVER,
         0x00, SD_DHCP6_OPTION_DOMAIN,
         0x00, SD_DHCP6_OPTION_SNTP_SERVER,
         0x00, SD_DHCP6_OPTION_INFORMATION_REFRESH_TIME,
         0x00, SD_DHCP6_OPTION_NTP_SERVER,
         0x00, SD_DHCP6_OPTION_INF_MAX_RT,
+        0x00, SD_DHCP6_OPTION_ADDR_REG_ENABLE,
         /* Client ID */
         0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
         CLIENT_ID_BYTES,
@@ -560,12 +608,13 @@ static const uint8_t msg_solicit[] = {
         /* Vendor Options */
         /* MUD URL */
         /* ORO */
-        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0a,
+        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0c,
         0x00, SD_DHCP6_OPTION_DNS_SERVER,
         0x00, SD_DHCP6_OPTION_DOMAIN,
         0x00, SD_DHCP6_OPTION_SNTP_SERVER,
         0x00, SD_DHCP6_OPTION_NTP_SERVER,
         0x00, SD_DHCP6_OPTION_SOL_MAX_RT,
+        0x00, SD_DHCP6_OPTION_ADDR_REG_ENABLE,
         /* Client ID */
         0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
         CLIENT_ID_BYTES,
@@ -624,11 +673,12 @@ static const uint8_t msg_request[] = {
         /* Vendor Options */
         /* MUD URL */
         /* ORO */
-        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x08,
+        0x00, SD_DHCP6_OPTION_ORO, 0x00, 0x0a,
         0x00, SD_DHCP6_OPTION_DNS_SERVER,
         0x00, SD_DHCP6_OPTION_DOMAIN,
         0x00, SD_DHCP6_OPTION_SNTP_SERVER,
         0x00, SD_DHCP6_OPTION_NTP_SERVER,
+        0x00, SD_DHCP6_OPTION_ADDR_REG_ENABLE,
         /* Client ID */
         0x00, SD_DHCP6_OPTION_CLIENTID, 0x00, 0x0e,
         CLIENT_ID_BYTES,
@@ -870,6 +920,67 @@ static const uint8_t msg_advertise[] = {
         0x00, SD_DHCP6_OPTION_VENDOR_OPTS, 0x00, 0x09,
         0x00, 0x00, 0x00, 0x20, 0x00, 0xf7, 0x00, 0x01, VENDOR_SUBOPTION_BYTES,
 };
+
+TEST(address_registration_capability) {
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
+        _cleanup_(sd_dhcp6_lease_unrefp) sd_dhcp6_lease *lease = NULL;
+        _cleanup_free_ uint8_t *buf = NULL;
+        size_t offset;
+
+        ASSERT_OK(sd_dhcp6_client_new(&client));
+        ASSERT_TRUE(client->address_registration.enabled);
+        ASSERT_FALSE(client->address_registration.supported);
+        ASSERT_OK(sd_dhcp6_client_set_iaid(client, unaligned_read_be32((const uint8_t[]) { IA_ID_BYTES })));
+        ASSERT_OK(sd_dhcp6_client_set_duid_raw(
+                        client,
+                        unaligned_read_be16(client_id),
+                        client_id + sizeof(be16_t),
+                        sizeof(client_id) - sizeof(be16_t)));
+
+        buf = memdup(msg_advertise, sizeof(msg_advertise));
+        ASSERT_NOT_NULL(buf);
+        offset = sizeof(msg_advertise);
+        ASSERT_OK(dhcp6_option_append(&buf, &offset, SD_DHCP6_OPTION_ADDR_REG_ENABLE, 0, NULL));
+        ASSERT_OK(dhcp6_lease_new_from_message(
+                        client, (DHCP6Message*) buf, offset, NULL, NULL, &lease));
+        ASSERT_TRUE(lease->address_registration_supported);
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_SOLICIT, lease->address_registration_supported), 0);
+        ASSERT_FALSE(client->address_registration.supported);
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_ADVERTISE, lease->address_registration_supported), 1);
+        ASSERT_TRUE(client->address_registration.supported);
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ false), 0);
+        ASSERT_TRUE(client->address_registration.supported);
+
+        /* Restarting DHCPv6 on the same attachment must not discard discovered support. */
+        ASSERT_OK(sd_dhcp6_client_stop(client));
+        ASSERT_TRUE(client->address_registration.supported);
+
+        dhcp6_client_address_registration_reset(client);
+        ASSERT_FALSE(client->address_registration.supported);
+
+        lease = sd_dhcp6_lease_unref(lease);
+        buf = mfree(buf);
+        buf = memdup(msg_advertise, sizeof(msg_advertise));
+        ASSERT_NOT_NULL(buf);
+        offset = sizeof(msg_advertise);
+        ASSERT_OK(dhcp6_option_append(
+                        &buf, &offset, SD_DHCP6_OPTION_ADDR_REG_ENABLE, 1, &(const uint8_t) { 1 }));
+        ASSERT_OK(dhcp6_lease_new_from_message(
+                        client, (DHCP6Message*) buf, offset, NULL, NULL, &lease));
+        ASSERT_FALSE(lease->address_registration_supported);
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_ADVERTISE, lease->address_registration_supported), 0);
+
+        ASSERT_OK(dhcp6_client_set_address_registration_enabled(client, false));
+        ASSERT_EQ(dhcp6_client_address_registration_discover(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 0);
+        ASSERT_FALSE(client->address_registration.supported);
+}
 
 static void test_client_verify_information_request(const DHCP6Message *msg, size_t len) {
         log_debug("/* %s */", __func__);

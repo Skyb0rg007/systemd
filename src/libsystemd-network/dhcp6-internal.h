@@ -10,6 +10,7 @@
 
 #include "sd-dhcp6-client.h"
 
+#include "dhcp6-address-registration.h"
 #include "dhcp-duid-internal.h"
 #include "dhcp6-option.h"
 #include "dhcp6-protocol.h"
@@ -69,6 +70,8 @@ struct sd_dhcp6_client {
         OrderedSet *vendor_options;
         bool rapid_commit;
 
+        DHCP6AddressRegistrationEngine address_registration;
+
         struct sd_dhcp6_lease *lease;
 
         sd_dhcp6_client_callback_t callback;
@@ -83,6 +86,7 @@ int dhcp6_network_send_udp_socket(int s, const struct in6_addr *address, const v
 
 int dhcp6_client_send_message(sd_dhcp6_client *client);
 int dhcp6_client_set_transaction_id(sd_dhcp6_client *client, uint32_t transaction_id);
+int dhcp6_client_append_oro(sd_dhcp6_client *client, uint8_t **buf, size_t *offset);
 
 #define log_dhcp6_client_errno(client, error, fmt, ...)         \
         log_interface_prefix_full_errno(                        \
