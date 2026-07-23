@@ -219,7 +219,7 @@ TEST(dhcp6_address_registration_best_effort) {
                         test_address_registration_get(client, &address.in_addr.in6));
         ASSERT_TRUE(registration->transaction_active);
         ASSERT_FALSE(registration->registration_attempted);
-        ASSERT_EQ(registration->transmission_count, 0U);
+        ASSERT_EQ(registration->transmission_count, 1U);
 }
 
 DEFINE_TEST_MAIN(LOG_DEBUG);

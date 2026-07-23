@@ -258,6 +258,7 @@ static int address_registration_schedule_timer(
         sd_event_time_handler_t handler;
         const char *description;
         usec_t *stored_deadline_usec;
+        int r;
 
         assert(registration);
 
@@ -269,31 +270,45 @@ static int address_registration_schedule_timer(
         description = refresh ? "dhcp6-address-registration-refresh" :
                                 "dhcp6-address-registration-retransmit";
 
-        *stored_deadline_usec = deadline_usec;
-        if (!client->event || deadline_usec == USEC_INFINITY)
-                return 0;
+        if (client->event && deadline_usec != USEC_INFINITY) {
+                r = event_reset_time(
+                                client->event,
+                                event,
+                                CLOCK_BOOTTIME,
+                                deadline_usec,
+                                0,
+                                handler,
+                                registration,
+                                client->event_priority,
+                                description,
+                                true);
+                if (r < 0)
+                        return r;
+        }
 
-        return event_reset_time(
-                        client->event,
-                        event,
-                        CLOCK_BOOTTIME,
-                        deadline_usec,
-                        0,
-                        handler,
-                        registration,
-                        client->event_priority,
-                        description,
-                        true);
+        /* Record the deadline only once it is armed. Callers treat a stored deadline as proof that a timer
+         * is pending, and dhcp6_client_address_registration_attach_event() rearms from it, so publishing
+         * one that no event source will ever honour strands the registration. Storing it while there is no
+         * event loop yet is fine: attach_event() picks it up from here. */
+        *stored_deadline_usec = deadline_usec;
+        return 0;
 }
 
 static int address_registration_schedule_retransmission(
                 DHCP6AddressRegistration *registration,
                 usec_t now_usec) {
 
-        return address_registration_schedule_timer(
-                        registration,
-                        usec_add(now_usec, registration->retransmit_time_usec),
-                        /* refresh= */ false);
+        assert(registration);
+
+        usec_t deadline_usec = usec_add(now_usec, registration->retransmit_time_usec);
+
+        /* RFC 9686 section 4.5 sets no upper bound on the retransmission time, so with MRC disabled it
+         * doubles indefinitely. Once the deadline saturates, arming a timer that can never fire would
+         * strand the transaction as active with nothing left to drive it. */
+        if (deadline_usec == USEC_INFINITY)
+                return -ERANGE;
+
+        return address_registration_schedule_timer(registration, deadline_usec, /* refresh= */ false);
 }
 
 static int address_registration_schedule_refresh(
@@ -327,24 +342,58 @@ static int address_registration_set_next_refresh(
                 usec_t now_usec) {
 
         sd_dhcp6_client *client;
-        usec_t valid_usec;
+        usec_t valid_usec, next_refresh_usec;
+        int r;
 
         assert(registration);
 
         client = ASSERT_PTR(registration->client);
         valid_usec = usec_sub_unsigned(registration->lifetime_valid_usec, now_usec);
-        registration->lifetime_valid_reference_usec = registration->lifetime_valid_usec;
-        registration->next_refresh_usec = address_registration_refresh_target(client, valid_usec, now_usec);
+        next_refresh_usec = address_registration_refresh_target(client, valid_usec, now_usec);
 
         /* RFC 9686 section 4.6.1 computes NextAddrRegRefreshTime on every registration "but does not
          * schedule any refreshes": an address whose lifetime nothing updates expires exactly when the
          * server expects it to, so refreshing it would be pointless multicast traffic. Only the >1%
          * lifetime change in dhcp6_client_update_address_registration_at() arms a timer. Section 4.6.2
          * makes static addresses the sole exception, since no RA will ever move their lifetime. */
-        if (valid_usec == USEC_INFINITY)
-                return address_registration_schedule_refresh(registration, registration->next_refresh_usec);
+        if (valid_usec == USEC_INFINITY) {
+                r = address_registration_schedule_refresh(registration, next_refresh_usec);
+                if (r < 0)
+                        /* Leave next_refresh_usec unset, so that the next message of this transaction, or
+                         * else address_registration_ensure_refresh() once the transaction ends, tries
+                         * again. Publishing it here would satisfy the retry check in
+                         * address_registration_transmit() and leave a static address, which has no
+                         * lifetime update to fall back on, registered once and never refreshed. */
+                        return r;
+        }
 
+        registration->lifetime_valid_reference_usec = registration->lifetime_valid_usec;
+        registration->next_refresh_usec = next_refresh_usec;
         return 0;
+}
+
+static int address_registration_ensure_refresh(
+                DHCP6AddressRegistration *registration,
+                usec_t now_usec) {
+
+        assert(registration);
+
+        /* address_registration_set_next_refresh() leaves the target unset when arming the static refresh
+         * timer fails, so that the next message of the transaction retries. A transaction does not
+         * necessarily have a next message though: an ADDR-REG-REPLY ends it, and so does exhausting MRC.
+         * Every such ending has to pick the retry up, or a static address stays registered with nothing
+         * left to refresh it, contrary to RFC 9686 section 4.6.2.
+         *
+         * This covers transactions that never got a message out at all, not just those that did. MRC is
+         * spent on transmission attempts, so a persistently failing socket ends the transaction without
+         * having registered anything, and refusing to arm the retransmission timer ends it before the
+         * first attempt. A finite lifetime is refreshed by the next update from the network either way,
+         * but a static address has nothing to fall back on, and section 4.4 does not let registration
+         * stop before the client disconnects from the link. */
+        if (registration->next_refresh_usec != USEC_INFINITY)
+                return 0;
+
+        return address_registration_set_next_refresh(registration, now_usec);
 }
 
 static int address_registration_transmit(
@@ -360,20 +409,31 @@ static int address_registration_transmit(
                 registration->retransmit_time_usec = address_registration_randomized_retransmission_time(
                                 registration->retransmit_time_usec, /* initial= */ false);
 
+        r = address_registration_schedule_retransmission(registration, now_usec);
+        if (r < 0) {
+                /* Ending the transaction here is the same situation as exhausting MRC, so it needs the same
+                 * fallback. Report the original failure rather than whatever the fallback returns: this one
+                 * is what stopped the transmission. */
+                address_registration_cancel_transaction(registration);
+                (void) address_registration_ensure_refresh(registration, now_usec);
+                return r;
+        }
+
+        /* RFC 8415 section 15 counts transmission attempts, so a message that never leaves the host still
+         * consumes the MRC budget. Counting only successes would let a persistently failing socket
+         * retransmit forever. */
+        registration->transmission_count++;
+
         r = address_registration_send_message(registration, now_usec);
         if (r >= 0) {
-                registration->transmission_count++;
                 registration->registration_attempted = true;
                 /* RFC 9686 section 4.6.1 recalculates the refresh target when the client registers or
-                 * refreshes an address, i.e. on the first transmission of a transaction. Retransmissions
-                 * of that same transaction leave the already-computed deadline alone. */
-                if (registration->transmission_count == 1)
+                 * refreshes an address, i.e. on the first message of a transaction that actually goes out.
+                 * Later messages of that same transaction leave the already-computed deadline alone. */
+                if (registration->next_refresh_usec == USEC_INFINITY)
                         refresh_r = address_registration_set_next_refresh(registration, now_usec);
         }
 
-        int q = address_registration_schedule_retransmission(registration, now_usec);
-        if (q < 0)
-                return q;
         if (refresh_r < 0)
                 return refresh_r;
 
@@ -713,10 +773,27 @@ int dhcp6_client_address_registration_retransmit_at(
         if (client->address_registration.max_retransmissions > 0 &&
             registration->transmission_count >= client->address_registration.max_retransmissions) {
                 address_registration_cancel_transaction(registration);
-                return 0;
+                return address_registration_ensure_refresh(registration, now_usec);
         }
 
         return address_registration_transmit(registration, now_usec, /* retransmission= */ true);
+}
+
+static void address_registration_log_transaction_error(
+                DHCP6AddressRegistration *registration,
+                int error,
+                const char *operation) {
+
+        assert(registration);
+        assert(operation);
+
+        log_dhcp6_client_errno(
+                        registration->client,
+                        error,
+                        "Failed to %s address registration for %s%s: %m",
+                        operation,
+                        IN6_ADDR_TO_STRING(&registration->address),
+                        registration->transaction_active ? ", retrying" : ", transaction stopped");
 }
 
 static int address_registration_retransmit_event(sd_event_source *s, uint64_t usec, void *userdata) {
@@ -726,9 +803,7 @@ static int address_registration_retransmit_event(sd_event_source *s, uint64_t us
         r = dhcp6_client_address_registration_retransmit_at(
                         ASSERT_PTR(registration->client), &registration->address, now(CLOCK_BOOTTIME));
         if (r < 0)
-                log_dhcp6_client_errno(registration->client, r,
-                                       "Failed to retransmit address registration for %s, retrying: %m",
-                                       IN6_ADDR_TO_STRING(&registration->address));
+                address_registration_log_transaction_error(registration, r, "retransmit");
 
         return 0;
 }
@@ -764,9 +839,7 @@ static int address_registration_refresh_event(sd_event_source *s, uint64_t usec,
         r = dhcp6_client_address_registration_refresh_at(
                         ASSERT_PTR(registration->client), &registration->address, now(CLOCK_BOOTTIME));
         if (r < 0)
-                log_dhcp6_client_errno(registration->client, r,
-                                       "Failed to refresh address registration for %s, retrying: %m",
-                                       IN6_ADDR_TO_STRING(&registration->address));
+                address_registration_log_transaction_error(registration, r, "refresh");
 
         return 0;
 }
@@ -784,6 +857,7 @@ int dhcp6_client_process_address_registration_reply_at(
         DHCP6AddressRegistration *registration;
         const DHCP6Message *message = packet;
         size_t offset = offsetof(DHCP6Message, options), n_iaaddr = 0;
+        int r;
 
         assert(client);
         assert(packet || len == 0);
@@ -820,7 +894,6 @@ int dhcp6_client_process_address_registration_reply_at(
                 const uint8_t *optval;
                 size_t optlen;
                 uint16_t optcode;
-                int r;
 
                 r = dhcp6_option_parse(packet, len, &offset, &optcode, &optlen, &optval);
                 if (r < 0)
@@ -844,6 +917,13 @@ int dhcp6_client_process_address_registration_reply_at(
         address_registration_cancel_transaction(registration);
         log_dhcp6_client(client, "Received Address Registration Reply for %s",
                          IN6_ADDR_TO_STRING(&registration->address));
+
+        /* The reply ends the transaction, so this is the last chance to recover a static refresh whose
+         * timer could not be armed when the message went out. */
+        r = address_registration_ensure_refresh(registration, now_usec);
+        if (r < 0)
+                return r;
+
         return 1;
 }
 
@@ -872,7 +952,7 @@ int dhcp6_client_receive_address_registration_reply(sd_dhcp6_client *client) {
                 return 0;
         }
 
-        (void) dhcp6_client_process_address_registration_reply_at(
+        r = dhcp6_client_process_address_registration_reply_at(
                         client,
                         packet,
                         len,
@@ -881,6 +961,9 @@ int dhcp6_client_receive_address_registration_reply(sd_dhcp6_client *client) {
                         ifindex,
                         truncated,
                         now(CLOCK_BOOTTIME));
+        if (r < 0)
+                log_dhcp6_client_errno(client, r, "Failed to process address registration reply, ignoring: %m");
+
         return 0;
 }
 

@@ -3319,10 +3319,10 @@ MultiPathRoute=2001:db8::1@eth0</programlisting>
       <varlistentry>
         <term><varname>AddressRegistrationMaxRetransmissions=</varname></term>
         <listitem>
-          <para>Specifies the maximum total number of successfully transmitted messages for each DHCPv6
-          Address Registration exchange, including the initial message. Takes an unsigned integer. A
-          positive value limits the total transmissions, while zero permits unlimited transmissions.
-          Defaults to 3.</para>
+          <para>Specifies the maximum total number of transmission attempts for each DHCPv6 Address
+          Registration exchange, including the initial message. Attempts that fail before the message
+          leaves the host count towards the limit. Takes an unsigned integer. A positive value limits the
+          total attempts, while zero permits unlimited attempts. Defaults to 3.</para>
 
           <xi:include href="version-info.xml" xpointer="v262"/>
         </listitem>
