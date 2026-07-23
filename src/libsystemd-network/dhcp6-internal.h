@@ -86,7 +86,6 @@ int dhcp6_network_send_udp_socket(int s, const struct in6_addr *address, const v
 
 int dhcp6_client_send_message(sd_dhcp6_client *client);
 int dhcp6_client_set_transaction_id(sd_dhcp6_client *client, uint32_t transaction_id);
-int dhcp6_client_append_oro(sd_dhcp6_client *client, uint8_t **buf, size_t *offset);
 
 #define log_dhcp6_client_errno(client, error, fmt, ...)         \
         log_interface_prefix_full_errno(                        \

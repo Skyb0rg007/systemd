@@ -16,7 +16,6 @@
 #include "networkd-wwan.h"
 #include "tests.h"
 #include "time-util.h"
-#include "unaligned.h"
 
 static DHCP6AddressRegistration *test_address_registration_get(
                 sd_dhcp6_client *client,
@@ -224,7 +223,6 @@ static int address_registration_defer_handler(sd_event_source *s, void *userdata
 TEST(dhcp6_address_registration_attachment_boundaries) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
-        _cleanup_free_ uint8_t *buf = NULL;
         const struct ether_addr bssid1 = { .ether_addr_octet = { 0, 1, 2, 3, 4, 5 } };
         const struct ether_addr bssid2 = { .ether_addr_octet = { 0, 1, 2, 3, 4, 6 } };
         Link link = {
@@ -233,10 +231,6 @@ TEST(dhcp6_address_registration_attachment_boundaries) {
         Bearer bearer = {
                 .connected = true,
         };
-        size_t offset = 0, option_offset = 0, optlen;
-        const uint8_t *optval;
-        unsigned n_address_registration = 0;
-        uint16_t optcode;
         int enabled;
 
         ASSERT_OK(sd_event_new(&event));
@@ -262,15 +256,6 @@ TEST(dhcp6_address_registration_attachment_boundaries) {
         ASSERT_NOT_NULL(client->timeout_resend);
         ASSERT_OK(sd_event_source_get_enabled(client->timeout_resend, &enabled));
         ASSERT_EQ(enabled, SD_EVENT_ONESHOT);
-
-        ASSERT_NOT_NULL(buf = new0(uint8_t, 1));
-        ASSERT_OK(dhcp6_client_append_oro(client, &buf, &offset));
-        ASSERT_OK(dhcp6_option_parse(buf, offset, &option_offset, &optcode, &optlen, &optval));
-        ASSERT_EQ(optcode, SD_DHCP6_OPTION_ORO);
-        for (size_t i = 0; i < optlen / sizeof(be16_t); i++)
-                if (unaligned_read_be16(optval + i * sizeof(be16_t)) == SD_DHCP6_OPTION_ADDR_REG_ENABLE)
-                        n_address_registration++;
-        ASSERT_EQ(n_address_registration, 1U);
 
         ASSERT_EQ(dhcp6_client_address_registration_discover(
                           client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 1);

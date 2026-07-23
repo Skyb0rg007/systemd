@@ -680,7 +680,7 @@ static DHCP6MessageType client_message_type_from_state(sd_dhcp6_client *client) 
         }
 }
 
-int dhcp6_client_append_oro(sd_dhcp6_client *client, uint8_t **buf, size_t *offset) {
+static int client_append_oro(sd_dhcp6_client *client, uint8_t **buf, size_t *offset) {
         _cleanup_free_ be16_t *p = NULL;
         size_t n = 0, n_extra;
 
@@ -822,7 +822,7 @@ int dhcp6_client_send_message(sd_dhcp6_client *client) {
         if (r < 0)
                 return r;
 
-        r = dhcp6_client_append_oro(client, &buf, &offset);
+        r = client_append_oro(client, &buf, &offset);
         if (r < 0)
                 return r;
 
