@@ -1542,6 +1542,12 @@ int sd_dhcp6_client_attach_event(sd_dhcp6_client *client, sd_event *event, int64
 
         client->event_priority = priority;
 
+        r = dhcp6_client_address_registration_attach_event(client);
+        if (r < 0) {
+                client->event = sd_event_unref(client->event);
+                return r;
+        }
+
         return 0;
 }
 
@@ -1549,6 +1555,7 @@ int sd_dhcp6_client_detach_event(sd_dhcp6_client *client) {
         assert_return(client, -EINVAL);
         assert_return(!sd_dhcp6_client_is_running(client), -EBUSY);
 
+        dhcp6_client_address_registration_detach_event(client);
         client->event = sd_event_unref(client->event);
 
         return 0;
@@ -1569,6 +1576,8 @@ int sd_dhcp6_client_attach_device(sd_dhcp6_client *client, sd_device *dev) {
 static sd_dhcp6_client *dhcp6_client_free(sd_dhcp6_client *client) {
         if (!client)
                 return NULL;
+
+        dhcp6_client_address_registration_done(client);
 
         sd_dhcp6_lease_unref(client->lease);
 
@@ -1615,7 +1624,12 @@ int sd_dhcp6_client_new(sd_dhcp6_client **ret) {
                 .request_ia = DHCP6_REQUEST_IA_NA | DHCP6_REQUEST_IA_PD,
                 .fd = -EBADF,
                 .rapid_commit = true,
-                .address_registration.enabled = true,
+                .address_registration = {
+                        .enabled = true,
+                        .fd = -EBADF,
+                        .initial_retransmission_time_usec = DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT,
+                        .max_retransmissions = DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC,
+                },
         };
 
         *ret = TAKE_PTR(client);
