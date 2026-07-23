@@ -209,7 +209,7 @@ TEST(dhcp6_address_registration_best_effort) {
         DHCP6AddressRegistration *registration = ASSERT_PTR(
                         test_address_registration_get(client, &address.in_addr.in6));
         ASSERT_TRUE(registration->transaction_active);
-        ASSERT_FALSE(registration->has_been_registered);
+        ASSERT_FALSE(registration->registration_attempted);
         ASSERT_EQ(registration->transmission_count, 0U);
 }
 

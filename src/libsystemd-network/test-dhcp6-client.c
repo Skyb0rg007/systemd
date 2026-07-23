@@ -1402,7 +1402,7 @@ TEST(address_registration_network_failures) {
                 DHCP6AddressRegistration *registration = ASSERT_PTR(
                                 test_address_registration_get(client, &ia_na_address1));
                 ASSERT_TRUE(registration->transaction_active);
-                ASSERT_FALSE(registration->has_been_registered);
+                ASSERT_FALSE(registration->registration_attempted);
                 ASSERT_EQ(registration->transmission_count, 0U);
                 ASSERT_EQ(registration->retransmit_deadline_usec, now_usec + 900 * USEC_PER_MSEC);
                 ASSERT_EQ(client->address_registration.fd, -EBADF);
@@ -1411,7 +1411,7 @@ TEST(address_registration_network_failures) {
                                   client, &ia_na_address1, now_usec + USEC_PER_SEC), 1);
                 ASSERT_EQ(test.n_open, 2U);
                 ASSERT_EQ(test.n_sent, 1U);
-                ASSERT_TRUE(registration->has_been_registered);
+                ASSERT_TRUE(registration->registration_attempted);
                 ASSERT_EQ(registration->transmission_count, 1U);
         }
 
@@ -1431,7 +1431,7 @@ TEST(address_registration_network_failures) {
                 DHCP6AddressRegistration *registration = ASSERT_PTR(
                                 test_address_registration_get(client, &ia_na_address1));
                 ASSERT_TRUE(registration->transaction_active);
-                ASSERT_FALSE(registration->has_been_registered);
+                ASSERT_FALSE(registration->registration_attempted);
                 ASSERT_EQ(registration->transmission_count, 0U);
                 ASSERT_EQ(client->address_registration.fd, -EBADF);
 
@@ -1440,7 +1440,7 @@ TEST(address_registration_network_failures) {
                 ASSERT_EQ(test.n_open, 2U);
                 ASSERT_EQ(test.n_send_attempts, 2U);
                 ASSERT_EQ(test.n_sent, 1U);
-                ASSERT_TRUE(registration->has_been_registered);
+                ASSERT_TRUE(registration->registration_attempted);
         }
 
         {
@@ -1468,7 +1468,7 @@ TEST(address_registration_network_failures) {
                 }
 
                 ASSERT_TRUE(registration->transaction_active);
-                ASSERT_FALSE(registration->has_been_registered);
+                ASSERT_FALSE(registration->registration_attempted);
                 ASSERT_EQ(registration->transmission_count, 0U);
                 ASSERT_EQ(test.n_sent, 0U);
         }
@@ -1592,7 +1592,7 @@ TEST(address_registration_discovery_starts_existing) {
         dhcp6_client_address_registration_reset(client);
         ASSERT_FALSE(client->address_registration.supported);
         ASSERT_FALSE(registration->transaction_active);
-        ASSERT_FALSE(registration->has_been_registered);
+        ASSERT_FALSE(registration->registration_attempted);
         ASSERT_EQ(client->address_registration.fd, -EBADF);
         ASSERT_EQ(hashmap_size(client->address_registration.registrations), 1U);
 

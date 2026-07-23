@@ -356,7 +356,10 @@ static int address_registration_transmit(
         r = address_registration_send_message(registration, now_usec);
         if (r >= 0) {
                 registration->transmission_count++;
-                registration->has_been_registered = true;
+                registration->registration_attempted = true;
+                /* Only the first transmission of a transaction (re)calculates the refresh target.
+                 * Later retransmissions merely reassert the already-computed deadline, which is a no-op;
+                 * this just keeps the two branches structurally symmetric. */
                 refresh_r = registration->transmission_count == 1 ?
                                 address_registration_set_next_refresh(registration, now_usec) :
                                 address_registration_schedule_timer(
@@ -391,7 +394,7 @@ static int address_registration_start_transaction(
         registration->next_refresh_usec = USEC_INFINITY;
 
         transaction_id = dhcp6_address_registration_random_u32() & 0x00ffffffU;
-        if (registration->has_been_registered && htobe32(transaction_id) == previous_transaction_id)
+        if (registration->registration_attempted && htobe32(transaction_id) == previous_transaction_id)
                 transaction_id = (transaction_id + 1) & 0x00ffffffU;
         registration->transaction_id = htobe32(transaction_id);
         registration->transmission_count = 0;
@@ -454,7 +457,7 @@ int dhcp6_client_update_address_registration_at(
         registration->lifetime_valid_usec = lifetime_valid_usec;
 
         if (client->address_registration.supported &&
-            !registration->has_been_registered &&
+            !registration->registration_attempted &&
             !registration->transaction_active) {
                 r = address_registration_start_transaction(registration, now_usec);
                 if (r < 0) {
@@ -463,7 +466,7 @@ int dhcp6_client_update_address_registration_at(
                         return r;
                 }
         } else if (!is_new && client->address_registration.supported &&
-                   registration->has_been_registered) {
+                   registration->registration_attempted) {
                 usec_t reference_remaining_usec = address_registration_lifetime_remaining(
                                 registration->lifetime_valid_reference_usec, now_usec);
                 usec_t valid_remaining_usec = address_registration_lifetime_remaining(
@@ -620,7 +623,7 @@ void dhcp6_client_address_registration_reset(sd_dhcp6_client *client) {
                 address_registration_cancel_refresh(registration);
                 registration->lifetime_valid_reference_usec = USEC_INFINITY;
                 registration->next_refresh_usec = USEC_INFINITY;
-                registration->has_been_registered = false;
+                registration->registration_attempted = false;
         }
 
         address_registration_close_socket(client);

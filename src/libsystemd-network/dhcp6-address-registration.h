@@ -36,7 +36,8 @@ struct DHCP6AddressRegistration {
         usec_t next_refresh_usec;
         usec_t refresh_deadline_usec;
         bool transaction_active;
-        bool has_been_registered;
+        bool registration_attempted; /* an ADDR-REG-INFORM has been sent at least once; does not imply an
+                                       * ADDR-REG-REPLY was ever received */
 };
 
 typedef struct DHCP6AddressRegistrationEngine {
