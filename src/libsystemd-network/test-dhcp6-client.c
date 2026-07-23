@@ -447,7 +447,12 @@ static void test_client_oro_one(DHCP6State state, bool enabled, bool requested, 
                           unaligned_read_be16(client_id),
                           client_id + sizeof(be16_t),
                           sizeof(client_id) - sizeof(be16_t)));
-        ASSERT_OK(dhcp6_client_set_address_registration_enabled(client, enabled));
+        dhcp6_client_set_address_registration_parameters(
+                        client,
+                        enabled,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL);
         ASSERT_OK(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_DNS_SERVER));
         if (requested)
                 ASSERT_OK(sd_dhcp6_client_set_request_option(client, SD_DHCP6_OPTION_ADDR_REG_ENABLE));
@@ -999,7 +1004,9 @@ TEST(address_registration_capability) {
                           client, DHCP6_MESSAGE_REPLY, /* advertised= */ false), 0);
         ASSERT_TRUE(client->address_registration.supported);
 
-        /* Restarting DHCPv6 on the same attachment must not discard discovered support. */
+        /* RFC 9686 section 4.4: once registration has started the client must not stop "until it
+         * disconnects from the link". Restarting DHCPv6 on the same attachment must not discard
+         * discovered support. */
         ASSERT_OK(sd_dhcp6_client_stop(client));
         ASSERT_TRUE(client->address_registration.supported);
 
@@ -1019,7 +1026,12 @@ TEST(address_registration_capability) {
         ASSERT_EQ(dhcp6_client_address_registration_discover(
                           client, DHCP6_MESSAGE_ADVERTISE, lease->address_registration_supported), 0);
 
-        ASSERT_OK(dhcp6_client_set_address_registration_enabled(client, false));
+        dhcp6_client_set_address_registration_parameters(
+                        client,
+                        false,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL);
         ASSERT_EQ(dhcp6_client_address_registration_discover(
                           client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 0);
         ASSERT_FALSE(client->address_registration.supported);
@@ -1234,6 +1246,27 @@ static uint8_t *test_address_registration_reply(
 
         *ret_len = offset;
         return TAKE_PTR(buf);
+}
+
+static void test_address_registration_ack_at(
+                sd_dhcp6_client *client,
+                const struct in6_addr *address,
+                usec_t now_usec) {
+
+        _cleanup_free_ uint8_t *reply = NULL;
+        const struct sockaddr_in6 sender = {
+                .sin6_family = AF_INET6,
+                .sin6_addr = local_address,
+                .sin6_port = htobe16(DHCP6_PORT_SERVER),
+        };
+        DHCP6AddressRegistration *registration;
+        size_t len;
+
+        registration = ASSERT_PTR(test_address_registration_get(client, address));
+        reply = test_address_registration_reply(
+                        registration->transaction_id, address, 1, sizeof(struct iaaddr), &len);
+        ASSERT_EQ(dhcp6_client_process_address_registration_reply_at(
+                          client, reply, len, &sender, address, test_ifindex, false, now_usec), 1);
 }
 
 TEST(address_registration_exchange) {
@@ -1470,20 +1503,26 @@ TEST(address_registration_event_migration) {
         DHCP6AddressRegistration *registration = ASSERT_PTR(
                         test_address_registration_get(client, &ia_na_address1));
         const usec_t retransmit_deadline_usec = registration->retransmit_deadline_usec;
+        const usec_t refresh_deadline_usec = registration->refresh_deadline_usec;
         ASSERT_TRUE(sd_event_source_get_event(client->address_registration.receive_event) == event_old);
         ASSERT_TRUE(sd_event_source_get_event(registration->retransmit_event) == event_old);
+        ASSERT_TRUE(sd_event_source_get_event(registration->refresh_event) == event_old);
 
         ASSERT_OK(sd_dhcp6_client_stop(client));
         ASSERT_OK(sd_dhcp6_client_detach_event(client));
         ASSERT_NULL(client->address_registration.receive_event);
         ASSERT_NULL(registration->retransmit_event);
+        ASSERT_NULL(registration->refresh_event);
         ASSERT_GE(client->address_registration.fd, 0);
         ASSERT_EQ(registration->retransmit_deadline_usec, retransmit_deadline_usec);
+        ASSERT_EQ(registration->refresh_deadline_usec, refresh_deadline_usec);
 
         ASSERT_OK(sd_dhcp6_client_attach_event(client, event_new, 20));
         ASSERT_TRUE(sd_event_source_get_event(client->address_registration.receive_event) == event_new);
         ASSERT_TRUE(sd_event_source_get_event(registration->retransmit_event) == event_new);
+        ASSERT_TRUE(sd_event_source_get_event(registration->refresh_event) == event_new);
         ASSERT_EQ(registration->retransmit_deadline_usec, retransmit_deadline_usec);
+        ASSERT_EQ(registration->refresh_deadline_usec, refresh_deadline_usec);
 
         ASSERT_OK(sd_dhcp6_client_set_local_address(client, &local_address));
         ASSERT_OK(sd_dhcp6_client_set_information_request(client, true));
@@ -1493,6 +1532,53 @@ TEST(address_registration_event_migration) {
 
         test_fd[1] = safe_close(test_fd[1]);
         test_client_sent_message_count = 0;
+}
+
+TEST(address_registration_survives_same_link_restart) {
+        AddressRegistrationTest test = {
+                .next_transaction_id = 0x123456,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
+                test_address_registration_client_new(&test);
+        const usec_t now_usec = 100 * USEC_PER_SEC;
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true, now_usec), 1);
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client, &ia_na_address1, USEC_INFINITY, USEC_INFINITY, now_usec), 1);
+
+        DHCP6AddressRegistration *registration = ASSERT_PTR(
+                        test_address_registration_get(client, &ia_na_address1));
+        const usec_t refresh_deadline_usec = registration->refresh_deadline_usec;
+        ASSERT_TRUE(registration->transaction_active);
+        ASSERT_GE(client->address_registration.fd, 0);
+
+        /* RFC 9686 section 4.4 forbids stopping registration short of a link disconnect, and stopping the
+         * DHCPv6 client is not one: networkd restarts it on the same link when an RA switches it to
+         * managed mode, when the MAC changes, and when the IPv6LL source address changes. Everything --
+         * discovered support, the socket, the in-flight transaction and the refresh -- must survive. */
+        ASSERT_OK(sd_dhcp6_client_stop(client));
+        ASSERT_TRUE(client->address_registration.supported);
+        ASSERT_GE(client->address_registration.fd, 0);
+        ASSERT_TRUE(registration->transaction_active);
+        ASSERT_TRUE(registration->registration_attempted);
+        ASSERT_EQ(registration->refresh_deadline_usec, refresh_deadline_usec);
+        ASSERT_EQ(test.n_sent, 1U);
+
+        /* A later Reply without the option must not restart it either, and must not re-register. */
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ false, now_usec), 0);
+        ASSERT_TRUE(client->address_registration.supported);
+        ASSERT_EQ(test.n_sent, 1U);
+
+        /* Only an explicit reset -- what networkd does on carrier loss -- tears it down. */
+        dhcp6_client_address_registration_reset(client);
+        ASSERT_FALSE(client->address_registration.supported);
+        ASSERT_EQ(client->address_registration.fd, -EBADF);
+        ASSERT_FALSE(registration->transaction_active);
+        ASSERT_FALSE(registration->registration_attempted);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+        ASSERT_EQ(hashmap_size(client->address_registration.registrations), 1U);
 }
 
 TEST(address_registration_discovery_starts_existing) {
@@ -1546,6 +1632,250 @@ TEST(address_registration_retransmission_time) {
         ASSERT_EQ(dhcp6_address_registration_next_retransmission_time(
                           USEC_PER_SEC, 200 * USEC_PER_MSEC),
                   2100 * USEC_PER_MSEC);
+        ASSERT_EQ(dhcp6_address_registration_refresh_interval(100 * USEC_PER_SEC, 900000),
+                  72 * USEC_PER_SEC);
+        ASSERT_EQ(dhcp6_address_registration_refresh_interval(100 * USEC_PER_SEC, 1100000),
+                  88 * USEC_PER_SEC);
+}
+
+TEST(address_registration_finite_refresh) {
+        AddressRegistrationTest test = {
+                .next_transaction_id = 0x123456,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
+                test_address_registration_client_new(&test);
+        const usec_t start_usec = 100 * USEC_PER_SEC;
+        DHCP6AddressRegistration *registration;
+        be32_t first_transaction_id;
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, true, start_usec), 1);
+        ASSERT_EQ(client->address_registration.desync_multiplier, 900000U);
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec + 100 * USEC_PER_SEC,
+                          start_usec), 1);
+
+        registration = ASSERT_PTR(test_address_registration_get(client, &ia_na_address1));
+        first_transaction_id = registration->transaction_id;
+        ASSERT_EQ(registration->next_refresh_usec, start_usec + 72 * USEC_PER_SEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+        ASSERT_EQ(registration->lifetime_valid_reference_usec, start_usec + 100 * USEC_PER_SEC);
+
+        test_address_registration_ack_at(client, &ia_na_address1, start_usec);
+        ASSERT_FALSE(registration->transaction_active);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec + 100 * USEC_PER_SEC,
+                          start_usec + 10 * USEC_PER_SEC), 1);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec + 100 * USEC_PER_SEC + 800 * USEC_PER_MSEC,
+                          start_usec + 10 * USEC_PER_SEC), 1);
+        ASSERT_EQ(registration->lifetime_valid_usec,
+                  start_usec + 100 * USEC_PER_SEC + 800 * USEC_PER_MSEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+
+        /* Each extension is less than 1% of the immediately preceding lifetime. They must accumulate
+         * against the lifetime used for the registration and eventually schedule a refresh. */
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec + 101 * USEC_PER_SEC + 600 * USEC_PER_MSEC,
+                          start_usec + 10 * USEC_PER_SEC), 1);
+        ASSERT_EQ(registration->refresh_deadline_usec, start_usec + 72 * USEC_PER_SEC);
+
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 20 * USEC_PER_SEC,
+                          start_usec + 31 * USEC_PER_SEC,
+                          start_usec + 11 * USEC_PER_SEC), 1);
+        ASSERT_EQ(registration->refresh_deadline_usec,
+                  start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC);
+
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 100 * USEC_PER_SEC,
+                          start_usec + 212 * USEC_PER_SEC,
+                          start_usec + 12 * USEC_PER_SEC), 1);
+        ASSERT_EQ(registration->refresh_deadline_usec,
+                  start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC);
+
+        ASSERT_EQ(dhcp6_client_address_registration_refresh_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 25 * USEC_PER_SEC + 399 * USEC_PER_MSEC), 0);
+        ASSERT_EQ(test.n_sent, 1U);
+        ASSERT_EQ(dhcp6_client_address_registration_refresh_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC), 0);
+        ASSERT_EQ(test.n_sent, 2U);
+        ASSERT_NE(registration->transaction_id, first_transaction_id);
+        ASSERT_TRUE(registration->transaction_active);
+        ASSERT_EQ(registration->next_refresh_usec,
+                  start_usec + 159 * USEC_PER_SEC + 752 * USEC_PER_MSEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+
+        test_address_registration_ack_at(
+                        client,
+                        &ia_na_address1,
+                        start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC,
+                          start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC,
+                          start_usec + 25 * USEC_PER_SEC + 400 * USEC_PER_MSEC), 0);
+        ASSERT_EQ(hashmap_size(client->address_registration.registrations), 0U);
+}
+
+TEST(address_registration_unupdated_finite_lifetime) {
+        AddressRegistrationTest test = {
+                .next_transaction_id = 0x123456,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
+                test_address_registration_client_new(&test);
+        const usec_t start_usec = 100 * USEC_PER_SEC;
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, /* advertised= */ true, start_usec), 1);
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec + 100 * USEC_PER_SEC,
+                          start_usec), 1);
+
+        DHCP6AddressRegistration *registration = ASSERT_PTR(
+                        test_address_registration_get(client, &ia_na_address1));
+        test_address_registration_ack_at(client, &ia_na_address1, start_usec);
+        ASSERT_EQ(test.n_sent, 1U);
+
+        /* RFC 9686 section 4.6.1 computes NextAddrRegRefreshTime on registration "but does not schedule
+         * any refreshes". Nothing ever updates this address's lifetime, so it expires exactly when the
+         * server expects it to and no refresh is due -- arming one here would only add multicast traffic
+         * the specification explicitly rules out. */
+        ASSERT_EQ(registration->next_refresh_usec, start_usec + 72 * USEC_PER_SEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+        ASSERT_EQ(dhcp6_client_address_registration_refresh_at(
+                          client, &ia_na_address1, start_usec + 72 * USEC_PER_SEC), 0);
+        ASSERT_EQ(test.n_sent, 1U);
+        ASSERT_FALSE(registration->transaction_active);
+}
+
+TEST(address_registration_static_refresh_and_parameters) {
+        AddressRegistrationTest test = {
+                .next_transaction_id = 0x654321,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
+                test_address_registration_client_new(&test);
+        const usec_t start_usec = 100 * USEC_PER_SEC;
+        DHCP6AddressRegistration *registration;
+        be32_t first_transaction_id;
+
+        dhcp6_client_set_address_registration_parameters(
+                        client, true, 2 * USEC_PER_SEC, 0, 30 * USEC_PER_SEC);
+        ASSERT_EQ(client->address_registration.max_retransmissions, 0U);
+        dhcp6_client_set_address_registration_parameters(
+                        client, true, 2 * USEC_PER_SEC, 1, 30 * USEC_PER_SEC);
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, true, start_usec), 1);
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client, &ia_na_address1, USEC_INFINITY, USEC_INFINITY, start_usec), 1);
+
+        registration = ASSERT_PTR(test_address_registration_get(client, &ia_na_address1));
+        first_transaction_id = registration->transaction_id;
+        ASSERT_EQ(registration->retransmit_deadline_usec,
+                  start_usec + 1800 * USEC_PER_MSEC);
+        ASSERT_EQ(registration->next_refresh_usec, start_usec + 30 * USEC_PER_SEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, start_usec + 30 * USEC_PER_SEC);
+
+        ASSERT_EQ(dhcp6_client_address_registration_retransmit_at(
+                          client, &ia_na_address1, start_usec + 1800 * USEC_PER_MSEC), 0);
+        ASSERT_EQ(test.n_sent, 1U);
+        ASSERT_FALSE(registration->transaction_active);
+        ASSERT_EQ(registration->refresh_deadline_usec, start_usec + 30 * USEC_PER_SEC);
+
+        ASSERT_EQ(dhcp6_client_address_registration_refresh_at(
+                          client, &ia_na_address1, start_usec + 30 * USEC_PER_SEC), 0);
+        ASSERT_EQ(test.n_sent, 2U);
+        ASSERT_NE(registration->transaction_id, first_transaction_id);
+        ASSERT_EQ(registration->next_refresh_usec, start_usec + 60 * USEC_PER_SEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, start_usec + 60 * USEC_PER_SEC);
+
+        test_address_registration_ack_at(client, &ia_na_address1, start_usec + 30 * USEC_PER_SEC);
+        ASSERT_FALSE(registration->transaction_active);
+        ASSERT_EQ(registration->refresh_deadline_usec, start_usec + 60 * USEC_PER_SEC);
+
+        test.n_send_failures = 1;
+        ASSERT_ERROR(dhcp6_client_address_registration_refresh_at(
+                             client, &ia_na_address1, start_usec + 60 * USEC_PER_SEC), EIO);
+        ASSERT_TRUE(registration->transaction_active);
+        ASSERT_EQ(registration->transmission_count, 0U);
+        ASSERT_EQ(registration->next_refresh_usec, USEC_INFINITY);
+        ASSERT_EQ(registration->refresh_deadline_usec, USEC_INFINITY);
+
+        ASSERT_EQ(dhcp6_client_address_registration_retransmit_at(
+                          client, &ia_na_address1, start_usec + 62 * USEC_PER_SEC), 1);
+        ASSERT_EQ(registration->transmission_count, 1U);
+        ASSERT_EQ(registration->next_refresh_usec, start_usec + 92 * USEC_PER_SEC);
+        ASSERT_EQ(registration->refresh_deadline_usec, start_usec + 92 * USEC_PER_SEC);
+}
+
+TEST(address_registration_shared_desynchronization) {
+        AddressRegistrationTest test = {
+                .next_transaction_id = 1,
+                .random_value = 200000,
+        };
+        _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
+                test_address_registration_client_new(&test);
+        const usec_t start_usec = 100 * USEC_PER_SEC;
+
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, true, start_usec), 1);
+        ASSERT_EQ(client->address_registration.desync_multiplier, 1100000U);
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address1,
+                          start_usec + 100 * USEC_PER_SEC,
+                          start_usec + 100 * USEC_PER_SEC,
+                          start_usec), 1);
+        ASSERT_EQ(dhcp6_client_update_address_registration_at(
+                          client,
+                          &ia_na_address2,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec + 50 * USEC_PER_SEC,
+                          start_usec), 1);
+
+        ASSERT_EQ(ASSERT_PTR(test_address_registration_get(
+                                     client, &ia_na_address1))->next_refresh_usec,
+                  start_usec + 88 * USEC_PER_SEC);
+        ASSERT_EQ(ASSERT_PTR(test_address_registration_get(
+                                     client, &ia_na_address2))->next_refresh_usec,
+                  start_usec + 44 * USEC_PER_SEC);
+
+        dhcp6_client_address_registration_reset(client);
+        ASSERT_EQ(client->address_registration.desync_multiplier, 0U);
+        test.random_value = 0;
+        ASSERT_EQ(dhcp6_client_address_registration_discover_at(
+                          client, DHCP6_MESSAGE_REPLY, true, start_usec), 1);
+        ASSERT_EQ(client->address_registration.desync_multiplier, 900000U);
 }
 
 TEST(address_registration_reply_validation) {
@@ -1639,7 +1969,12 @@ TEST(address_registration_disabled) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client =
                 test_address_registration_client_new(&test);
 
-        ASSERT_OK(dhcp6_client_set_address_registration_enabled(client, false));
+        dhcp6_client_set_address_registration_parameters(
+                        client,
+                        false,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_IRT,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_MRC,
+                        DHCP6_ADDRESS_REGISTRATION_DEFAULT_STATIC_REFRESH_INTERVAL);
         ASSERT_EQ(dhcp6_client_address_registration_discover(
                           client, DHCP6_MESSAGE_REPLY, /* advertised= */ true), 0);
         ASSERT_EQ(dhcp6_client_update_address_registration_at(
