@@ -18,6 +18,7 @@
 #include "resolved-dns-search-domain.h"
 #include "resolved-dns-synthesize.h"
 #include "resolved-dns-transaction.h"
+#include "resolved-dns64.h"
 #include "resolved-etc-hosts.h"
 #include "resolved-hook.h"
 #include "resolved-manager.h"
@@ -454,7 +455,7 @@ static void dns_query_unlink_candidates(DnsQuery *q) {
                 dns_query_candidate_unref(dns_query_candidate_unlink(q->candidates));
 }
 
-static void dns_query_reset_answer(DnsQuery *q) {
+void dns_query_reset_answer(DnsQuery *q) {
         assert(q);
 
         q->answer = dns_answer_unref(q->answer);
@@ -468,6 +469,7 @@ static void dns_query_reset_answer(DnsQuery *q) {
         q->answer_family = AF_UNSPEC;
         q->answer_search_domain = dns_search_domain_unref(q->answer_search_domain);
         q->answer_full_packet = dns_packet_unref(q->answer_full_packet);
+        q->answer_non_authoritative = false;
 }
 
 DnsQuery *dns_query_free(DnsQuery *q) {
@@ -1082,6 +1084,17 @@ int dns_query_go(DnsQuery *q) {
                 return 1;
         }
 
+        /* RFC 8880 §7: answer ipv4only.arpa locally when DNS64 applies. After the local sources above, so
+         * that static records and /etc/hosts entries for the name keep taking precedence. */
+        DnsTransactionState state;
+        r = dns_query_dns64_synthesize_ipv4only_arpa(q, &state);
+        if (r < 0)
+                return r;
+        if (r > 0) {
+                dns_query_complete(q, state);
+                return 1;
+        }
+
         r = manager_hook_query(
                         q->manager,
                         q->question_bypass ? q->question_bypass->question : q->question_idna,
@@ -1110,6 +1123,12 @@ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
                 r = dns_query_synthesize_reply(q, &state);
                 if (r < 0)
                         goto fail;
+
+                r = dns_query_dns64_redirect(q, NULL, &state);
+                if (r < 0)
+                        goto fail;
+                if (r > 0)
+                        return; /* DNS64 A-query is pending */
 
                 dns_query_complete(q, state);
                 return;
@@ -1214,6 +1233,12 @@ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
         r = dns_query_synthesize_reply(q, &state);
         if (r < 0)
                 goto fail;
+
+        r = dns_query_dns64_redirect(q, c->scope, &state);
+        if (r < 0)
+                goto fail;
+        if (r > 0)
+                return; /* DNS64 A-query is pending */
 
         dns_query_complete(q, state);
         return;
@@ -1465,6 +1490,8 @@ int dns_query_process_cname_one(DnsQuery *q) {
                 q->previous_redirect_non_confidential = true;
         if (!FLAGS_SET(q->answer_query_flags, SD_RESOLVED_SYNTHETIC))
                 q->previous_redirect_non_synthetic = true;
+        if (q->answer_non_authoritative)
+                q->previous_redirect_non_authoritative = true;
 
         /* OK, let's actually follow the CNAME */
         r = dns_query_cname_redirect(q, cname);
@@ -1589,6 +1616,9 @@ bool dns_query_fully_confidential(DnsQuery *q) {
 
 bool dns_query_fully_authoritative(DnsQuery *q) {
         assert(q);
+
+        if (q->answer_non_authoritative || q->previous_redirect_non_authoritative)
+                return false;
 
         /* We are authoritative for everything synthetic (except if a previous CNAME/DNAME) wasn't
          * synthetic. (Note: SD_RESOLVED_SYNTHETIC is reset on each CNAME/DNAME, hence the explicit check for

@@ -88,7 +88,13 @@ typedef struct DnsQuery {
         bool previous_redirect_unauthenticated:1;
         bool previous_redirect_non_confidential:1;
         bool previous_redirect_non_synthetic:1;
+        bool previous_redirect_non_authoritative:1;
+        bool answer_non_authoritative:1;
         bool request_address_valid:1;
+
+        /* The completion state the query had when a DNS64 auxiliary A lookup was started, so the original
+         * AAAA outcome can be restored if synthesis turns out not to be possible. */
+        DnsTransactionState dns64_original_state;
 
         /* Bus + Varlink client information */
         sd_bus_message *bus_request;
@@ -147,6 +153,7 @@ int dns_query_process_cname_one(DnsQuery *q);
 int dns_query_process_cname_many(DnsQuery *q);
 
 void dns_query_complete(DnsQuery *q, DnsTransactionState state);
+void dns_query_reset_answer(DnsQuery *q);
 
 DnsQuestion* dns_query_question_for_protocol(DnsQuery *q, DnsProtocol protocol);
 

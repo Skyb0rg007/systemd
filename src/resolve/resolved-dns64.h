@@ -23,3 +23,11 @@ int dns64_extract_ipv4(
                 uint8_t prefix_length,
                 const struct in6_addr *addr,
                 struct in_addr *ret);
+
+void dns64_on_a_query_complete(DnsQuery *aux);
+
+int dns_query_dns64_redirect(DnsQuery *q, DnsScope *answer_scope, DnsTransactionState *state);
+
+int dns_query_dns64_synthesize_ipv4only_arpa(
+                DnsQuery *q,
+                DnsTransactionState *state);
