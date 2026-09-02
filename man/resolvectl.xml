@@ -232,14 +232,38 @@
       </varlistentry>
 
       <varlistentry>
+        <term><command>pref64</command> [<replaceable>LINK</replaceable> [<replaceable>PREFIX</replaceable>…]]</term>
+
+        <listitem><para>Get or set the NAT64 prefixes (PREF64s) used for DNS64 synthesis (RFC 6147) on an
+        interface. With no arguments, shows the configured PREF64s of all links. With just a
+        <replaceable>LINK</replaceable>, shows the PREF64s configured on that interface. With a
+        <replaceable>LINK</replaceable> and one or more <replaceable>PREFIX</replaceable> arguments, replaces
+        the ordered PREF64 list on that interface. Each <replaceable>PREFIX</replaceable> is given in
+        <replaceable>address</replaceable><literal>/</literal><replaceable>prefixlength</replaceable> notation
+        (for example <literal>64:ff9b::/96</literal>); the prefix length must be one of 32, 40, 48, 56, 64, or
+        96 (RFC 6052 §2.2). Host bits are cleared. The Well-Known Prefix may only be used with a prefix length
+        of 96. Duplicate prefixes are removed while retaining the first occurrence. Per RFC 7050 §3, all
+        configured prefixes are used for synthesis in the specified order. Passing a single empty string as
+        the prefix clears all PREF64s, disabling DNS64 synthesis on the interface.</para>
+
+        <para>When one or more PREF64s are set, <command>systemd-resolved</command> synthesizes AAAA records for
+        IPv6-only clients by embedding the IPv4 addresses of A records into each prefix, so the resulting
+        traffic can traverse a NAT64 gateway. DNS64 synthesis must also be enabled globally via the
+        <varname>DNS64=</varname> option (the default); see
+        <citerefentry><refentrytitle>resolved.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+
+        <xi:include href="version-info.xml" xpointer="v262"/></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><command>revert <replaceable>LINK</replaceable></command></term>
 
         <listitem><para>Revert the per-interface DNS configuration. If the DNS configuration is reverted all
         per-interface DNS setting are reset to their defaults, undoing all effects of <command>dns</command>,
         <command>domain</command>, <command>default-route</command>, <command>llmnr</command>,
         <command>mdns</command>, <command>dnssec</command>, <command>dnsovertls</command>,
-        <command>nta</command>. Note that when a network interface disappears all configuration is lost
-        automatically, an explicit reverting is not necessary in that case.</para>
+        <command>nta</command>, and <command>pref64</command>. Note that when a network interface disappears all
+        configuration is lost automatically, an explicit reverting is not necessary in that case.</para>
 
         <xi:include href="version-info.xml" xpointer="v239"/></listitem>
       </varlistentry>

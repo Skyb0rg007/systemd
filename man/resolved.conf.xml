@@ -229,6 +229,16 @@
         domains (TLDs) that are not known by the DNS root server. This
         logic does not work in all private zone setups.</para>
 
+        <para>Note that AAAA records produced by DNS64 synthesis (see
+        <varname>DNS64=</varname> below) are not covered by any DNSSEC
+        signature: they are derived locally from the underlying A
+        records. The AUTHENTICATED status is set only when both the
+        negative AAAA response and the A response were successfully
+        validated. A request with both the DNSSEC OK and Checking Disabled
+        bits set is returned without DNS64 synthesis, so that a validating
+        client can validate and synthesize the result itself. See RFC 6147
+        §5.5 and RFC 8683 §4.1 for the DNSSEC deployment considerations.</para>
+
         <para>Defaults to <literal>&DEFAULT_DNSSEC_MODE;</literal>.</para>
 
         <xi:include href="version-info.xml" xpointer="v229"/>
@@ -453,6 +463,72 @@ DNSStubListenerExtra=udp:[2001:db8:0:f102::13]:9953</programlisting>
         not be flushed when changing servers.</para>
 
         <xi:include href="version-info.xml" xpointer="v254"/>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>DNS64=</varname></term>
+        <listitem><para>Takes a boolean argument. If true (the default),
+        <command>systemd-resolved</command> performs DNS64 synthesis (RFC 6147)
+        on interfaces that have one or more NAT64 prefixes (PREF64s) configured. For
+        class-IN AAAA queries that receive an empty or unusable answer
+        (excluding NXDOMAIN), the resolver issues an A query for the same
+        name and synthesizes AAAA records by embedding each returned IPv4
+        address into the interface's PREF64s. This lets IPv6-only hosts
+        reach IPv4-only services via a NAT64 gateway.</para>
+
+        <para>If false, DNS64 synthesis is disabled regardless of any
+        configured PREF64s. Setting a PREF64 on an interface is the
+        per-interface opt-in; this global toggle is a kill switch.</para>
+
+        <para>One or more PREF64s may be configured per-interface via
+        <command>resolvectl pref64 <replaceable>LINK</replaceable> <replaceable>PREFIX</replaceable>…</command>,
+        or by network-management software using the <literal>io.systemd.Resolve</literal> Varlink
+        API. Valid prefix lengths are 32, 40, 48, 56, 64, and 96 (RFC 6052
+        §2.2). Prefix host bits are cleared and duplicates are removed. As required by RFC 7050 §3, every
+        configured prefix is used for synthesis in the specified order. The Well-Known Prefix
+        <literal>64:ff9b::/96</literal> is not used to synthesize addresses
+        for non-global IPv4 destinations; use a network-specific prefix when
+        private destinations are reachable through the NAT64 gateway.</para>
+
+        <para>Synthesis is tied to the interface carrying the PREF64s: it is
+        performed for lookups answered via that interface's DNS servers, or
+        explicitly bound to the interface (e.g. via
+        <command>resolvectl -i</command>). Lookups answered exclusively via
+        globally configured DNS servers are not subject to DNS64. Hence the
+        interface with the PREF64s should also carry the DNS server
+        configuration of the NAT64 network, which is the norm when both are
+        learned from the same network.</para>
+
+        <para>As required by RFC 8880, <literal>ipv4only.arpa</literal> is
+        answered locally when DNS64 applies. Its A response contains
+        <literal>192.0.0.170</literal> and <literal>192.0.0.171</literal>, and
+        its AAAA response contains those addresses embedded in all configured
+        PREF64s. Other record types receive an empty response, apart from DS
+        queries, which are resolved normally. Subdomains receive NXDOMAIN.</para>
+
+        <para>DNS64 also handles reverse lookups (RFC 6147 §5.3.1): a PTR
+        query for an <literal>ip6.arpa</literal> name whose address falls under
+        a configured PREF64 is answered with a synthesized CNAME pointing at the
+        corresponding <literal>in-addr.arpa</literal> name, which is then
+        resolved normally. This surfaces any real reverse-DNS information for the
+        embedded IPv4 address. The CNAME is only synthesized when that
+        <literal>in-addr.arpa</literal> name actually has a PTR record.</para>
+
+        <para>Synthesized AAAA records carry the
+        <constant>SD_RESOLVED_SYNTHETIC</constant> flag. Their TTL is set
+        to the minimum of the A record's TTL and the SOA negative-caching
+        TTL for the queried name (RFC 6147 §5.1.7); when no SOA is
+        available a fallback of 600 seconds is used. This keeps
+        synthesized records short-lived so clients refresh promptly after
+        a PREF64 change. The records are never themselves cached by
+        <command>systemd-resolved</command> — only the underlying A
+        records are — so a PREF64 change takes effect for subsequent
+        queries immediately within the resolver.</para>
+
+        <para>Defaults to true.</para>
+
+        <xi:include href="version-info.xml" xpointer="v262"/>
         </listitem>
       </varlistentry>
     </variablelist>
