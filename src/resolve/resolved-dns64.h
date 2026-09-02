@@ -31,3 +31,7 @@ int dns_query_dns64_redirect(DnsQuery *q, DnsScope *answer_scope, DnsTransaction
 int dns_query_dns64_synthesize_ipv4only_arpa(
                 DnsQuery *q,
                 DnsTransactionState *state);
+
+void dns64_on_ptr_query_complete(DnsQuery *aux);
+
+int dns_query_dns64_ptr_redirect(DnsQuery *q);

@@ -217,6 +217,23 @@ static int build_record_query(
         return dns_query_new(m, ret_query, question, question, NULL, ifindex, 0);
 }
 
+/* Build a PTR query for the IP6.ARPA name of the given IPv6 address. */
+static int build_ptr_query(Manager *m,
+                           DnsQuery **ret_query,
+                           const char *v6_str,
+                           int ifindex,
+                           uint64_t flags) {
+        union in_addr_union a = { .in6 = in6(v6_str) };
+        _cleanup_(dns_question_unrefp) DnsQuestion *q = NULL;
+        int r;
+
+        r = dns_question_new_reverse(&q, AF_INET6, &a);
+        if (r < 0)
+                return r;
+
+        return dns_query_new(m, ret_query, q, q, NULL, ifindex, flags);
+}
+
 static void link_set_pref64(Link *l, const char *prefix, uint8_t pl) {
         Dns64Prefix p = {
                 .address = in6(prefix),
@@ -332,6 +349,22 @@ static int add_dname_rr(DnsAnswer **answer, const char *name, const char *target
                         answer, rr, 1, DNS_ANSWER_CACHEABLE | DNS_ANSWER_SECTION_ANSWER, NULL);
 }
 
+static int add_ptr_rr(DnsAnswer **answer, const char *name, const char *target, uint32_t ttl) {
+        _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
+
+        rr = dns_resource_record_new_full(DNS_CLASS_IN, DNS_TYPE_PTR, name);
+        if (!rr)
+                return -ENOMEM;
+
+        rr->ptr.name = strdup(target);
+        if (!rr->ptr.name)
+                return -ENOMEM;
+
+        rr->ttl = ttl;
+        return dns_answer_add_extend(
+                        answer, rr, 1, DNS_ANSWER_CACHEABLE | DNS_ANSWER_SECTION_ANSWER, NULL);
+}
+
 static int add_soa_rr(DnsAnswer **answer, const char *name, uint32_t ttl, uint32_t minimum) {
         _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
 
@@ -353,6 +386,19 @@ static int add_soa_rr(DnsAnswer **answer, const char *name, uint32_t ttl, uint32
 
         return dns_answer_add_extend(
                         answer, rr, 1, DNS_ANSWER_CACHEABLE | DNS_ANSWER_SECTION_AUTHORITY, NULL);
+}
+
+/* True if the answer contains a CNAME with the given owner name and target. */
+static bool answer_has_cname(DnsAnswer *answer, const char *owner, const char *target) {
+        DnsResourceRecord *rr;
+
+        DNS_ANSWER_FOREACH(rr, answer)
+                if (rr->key->type == DNS_TYPE_CNAME &&
+                    dns_name_equal(dns_resource_key_name(rr->key), owner) > 0 &&
+                    dns_name_equal(rr->cname.name, target) > 0)
+                        return true;
+
+        return false;
 }
 
 static bool answer_has_aaaa(DnsAnswer *answer, const char *expected_ipv6) {
@@ -407,6 +453,15 @@ static size_t answer_count_aaaa(DnsAnswer *answer) {
 
 static void query_complete_record_state(DnsQuery *q) {
         assert(q);
+}
+
+static DnsTransactionState completed_state;
+
+static void query_complete_free_record_state(DnsQuery *q) {
+        assert(q);
+
+        completed_state = q->state;
+        dns_query_free(q);
 }
 
 /* §5.1: DNS64 acts on AAAA queries.  Pure-A queries are pass-through. */
@@ -1084,6 +1139,150 @@ TEST(dns_query_dns64_redirect_empty_success_no_link_short_circuits) {
 
         ASSERT_EQ(dns_query_dns64_redirect(query, NULL, &state), 0);
         ASSERT_EQ(answer_count_aaaa(query->answer), (size_t) 0);
+}
+
+/* ================================================================
+ * dns_query_dns64_ptr_redirect() / dns64_on_ptr_query_complete()
+ * — RFC 6147 §5.3.1 (synthesized-CNAME approach)
+ * ================================================================ */
+
+/* The completion path builds the final answer: a synthesized CNAME from the
+ * IP6.ARPA name to the corresponding IN-ADDR.ARPA name, followed by the real
+ * PTR records the reverse lookup returned. */
+TEST(dns64_ptr_synthesizes_cname_to_in_addr_arpa) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+        DnsQuery *aux = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        /* Original query: PTR for the IP6.ARPA name of 64:ff9b::c000:201, i.e.
+         * the DNS64 address embedding 192.0.2.1. */
+        ASSERT_OK(build_ptr_query(&manager, &query, "64:ff9b::c000:201", 1, 0));
+        query->complete = query_complete_record_state;
+        const char *ip6_name = dns_question_first_name(query->question_utf8);
+
+        /* Auxiliary reverse lookup for 192.0.2.1 -> 1.2.0.192.in-addr.arpa,
+         * answered with a real PTR record. */
+        union in_addr_union v4 = { .in = in4("192.0.2.1") };
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_ptr = NULL;
+        ASSERT_OK(dns_question_new_reverse(&question_ptr, AF_INET, &v4));
+        const char *in_addr_name = dns_question_first_name(question_ptr);
+
+        ASSERT_OK(dns_query_new(&manager, &aux, question_ptr, question_ptr, NULL, 1, 0));
+        ASSERT_OK(dns_query_make_auxiliary(aux, query));
+        ASSERT_OK(add_ptr_rr(&aux->answer, in_addr_name, "host.example.com", 300));
+        aux->state = DNS_TRANSACTION_SUCCESS;
+
+        dns64_on_ptr_query_complete(aux);
+
+        ASSERT_EQ(query->state, DNS_TRANSACTION_SUCCESS);
+        ASSERT_TRUE(answer_has_cname(query->answer, ip6_name, in_addr_name));
+        ASSERT_TRUE(answer_has_rr(query->answer, DNS_TYPE_PTR, in_addr_name));
+        ASSERT_TRUE(FLAGS_SET(query->answer_query_flags, SD_RESOLVED_SYNTHETIC));
+}
+
+TEST(dns64_ptr_existing_cname_suppresses_synthetic_cname) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+        DnsQuery *aux = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_ptr_query(&manager, &query, "64:ff9b::808:808", 1, 0));
+        query->complete = query_complete_record_state;
+
+        union in_addr_union v4 = { .in = in4("8.8.8.8") };
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_ptr = NULL;
+        ASSERT_OK(dns_question_new_reverse(&question_ptr, AF_INET, &v4));
+        const char *in_addr_name = dns_question_first_name(question_ptr);
+
+        ASSERT_OK(dns_query_new(&manager, &aux, question_ptr, question_ptr, NULL, 1, 0));
+        ASSERT_OK(dns_query_make_auxiliary(aux, query));
+        ASSERT_OK(add_cname_rr(&aux->answer, in_addr_name, "alias.example.com", 300));
+        ASSERT_OK(add_ptr_rr(&aux->answer, "alias.example.com", "host.example.com", 300));
+        aux->state = DNS_TRANSACTION_SUCCESS;
+
+        dns64_on_ptr_query_complete(aux);
+
+        ASSERT_EQ(query->state, DNS_TRANSACTION_SUCCESS);
+        ASSERT_TRUE(dns_answer_isempty(query->answer));
+        ASSERT_FALSE(FLAGS_SET(query->answer_query_flags, SD_RESOLVED_SYNTHETIC));
+}
+
+/* RFC 6147 §5.3.1: if the IN-ADDR.ARPA name has no PTR, we must not synthesize
+ * a CNAME pointing at nothing; the reverse lookup's outcome is returned. */
+TEST(dns64_ptr_no_reverse_record_propagates_outcome) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        DnsQuery *query = NULL;
+        DnsQuery *aux = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_ptr_query(&manager, &query, "64:ff9b::c000:201", 1, 0));
+        query->complete = query_complete_free_record_state;
+        completed_state = _DNS_TRANSACTION_STATE_INVALID;
+
+        union in_addr_union v4 = { .in = in4("192.0.2.1") };
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_ptr = NULL;
+        ASSERT_OK(dns_question_new_reverse(&question_ptr, AF_INET, &v4));
+        ASSERT_OK(dns_query_new(&manager, &aux, question_ptr, question_ptr, NULL, 1, 0));
+        ASSERT_OK(dns_query_make_auxiliary(aux, query));
+        aux->state = DNS_TRANSACTION_NOT_FOUND; /* NXDOMAIN-ish, no records */
+
+        dns64_on_ptr_query_complete(aux);
+
+        ASSERT_EQ(completed_state, DNS_TRANSACTION_NOT_FOUND);
+}
+
+/* A PTR for an address that does not fall under any configured PREF64 is left
+ * for normal resolution (returns 0, fires no auxiliary query). */
+TEST(dns_query_dns64_ptr_redirect_no_pref64_match_skipped) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        /* 2001:db8::1 is not under 64:ff9b::/96. */
+        ASSERT_OK(build_ptr_query(&manager, &query, "2001:db8::1", 1, 0));
+
+        ASSERT_EQ(dns_query_dns64_ptr_redirect(query), 0);
+}
+
+/* A forward (non-PTR) query is never intercepted by the reverse path. */
+TEST(dns_query_dns64_ptr_redirect_non_ptr_skipped) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_query(&manager, &query, AF_INET6, 1));
+
+        ASSERT_EQ(dns_query_dns64_ptr_redirect(query), 0);
+}
+
+/* SD_RESOLVED_NO_SYNTHESIZE opts the query out of reverse DNS64 entirely. */
+TEST(dns_query_dns64_ptr_redirect_no_synthesize_flag_skipped) {
+        Manager manager = { .dns64_enabled = true };
+        _cleanup_(link_freep) Link *link = NULL;
+        _cleanup_(dns_query_freep) DnsQuery *query = NULL;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "64:ff9b::", 96);
+
+        ASSERT_OK(build_ptr_query(&manager, &query, "64:ff9b::c000:201", 1, SD_RESOLVED_NO_SYNTHESIZE));
+
+        ASSERT_EQ(dns_query_dns64_ptr_redirect(query), 0);
 }
 
 DEFINE_TEST_MAIN(LOG_DEBUG);

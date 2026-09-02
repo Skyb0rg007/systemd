@@ -1107,6 +1107,15 @@ int dns_query_go(DnsQuery *q) {
         if (r > 0) /* hook calls are pending */
                 return 0;
 
+        /* RFC 6147 §5.3.1: a PTR query for an IP6.ARPA name under a configured
+         * PREF64 is answered via a synthesized CNAME to IN-ADDR.ARPA, resolved
+         * before we ever dispatch the (authority-less) IP6.ARPA name upstream. */
+        r = dns_query_dns64_ptr_redirect(q);
+        if (r < 0)
+                return r;
+        if (r > 0) /* auxiliary reverse lookup is pending; completion deferred */
+                return 0;
+
         return dns_query_go_scopes(q);
 }
 

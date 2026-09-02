@@ -439,6 +439,39 @@ static uint64_t dns64_synthesized_query_flags(DnsQuery *q, uint64_t flags) {
         return flags | SD_RESOLVED_SYNTHETIC;
 }
 
+/* Take over the auxiliary query's outcome, stripping its answer section: the auxiliary question does not
+ * match the original one, so its answer-section records would only confuse the client. Authority-section
+ * records (i.e. the SOA) are kept. */
+static int dns64_query_propagate_auxiliary_result(DnsQuery *q, DnsQuery *aux) {
+        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
+        DnsAnswerItem *item;
+        int r;
+
+        assert(q);
+        assert(aux);
+
+        DNS_ANSWER_FOREACH_ITEM(item, aux->answer) {
+                if (dns64_answer_item_is_in_answer_section(item))
+                        continue;
+
+                r = dns_answer_add_extend(&answer, item->rr, item->ifindex, item->flags, item->rrsig);
+                if (r < 0)
+                        return r;
+        }
+
+        dns64_query_reset_answer_preserve_search_domain(q);
+        q->answer = TAKE_PTR(answer);
+        q->answer_rcode = aux->answer_rcode;
+        q->answer_ede_rcode = aux->answer_ede_rcode;
+        q->answer_ede_msg = TAKE_PTR(aux->answer_ede_msg);
+        q->answer_dnssec_result = aux->answer_dnssec_result;
+        q->answer_errno = aux->answer_errno;
+        q->answer_query_flags = aux->answer_query_flags;
+        q->answer_protocol = aux->answer_protocol;
+        q->answer_family = aux->answer_family;
+        return 0;
+}
+
 static void dns64_query_complete_errno(DnsQuery *q, int error) {
         assert(q);
         assert(error < 0);
@@ -784,4 +817,298 @@ int dns_query_dns64_synthesize_ipv4only_arpa(DnsQuery *q, DnsTransactionState *s
         q->answer_rcode = DNS_RCODE_SUCCESS;
         *state = DNS_TRANSACTION_SUCCESS;
         return 1;
+}
+
+static int dns64_extract_ipv4_for_prefix(
+                const Dns64Prefix *prefix,
+                const struct in6_addr *addr,
+                struct in_addr *ret) {
+        int r;
+
+        assert(prefix);
+
+        r = dns64_extract_ipv4(&prefix->address, prefix->length, addr, ret);
+        if (r < 0)
+                return r;
+
+        if (dns64_prefix_is_well_known(prefix) &&
+            !dns64_well_known_prefix_supports_address(ret) &&
+            !IN_SET(be32toh(ret->s_addr), UINT32_C(0xc00000aa), UINT32_C(0xc00000ab)))
+                return -ENXIO;
+
+        return 0;
+}
+
+static int dns64_extract_ipv4_for_link(
+                Link *l,
+                const struct in6_addr *addr,
+                struct in_addr *ret,
+                uint8_t *ret_prefixlen) {
+
+        const Dns64Prefix *best = NULL;
+        struct in_addr best_v4;
+
+        assert(l);
+
+        FOREACH_ARRAY(prefix, l->dns64_prefixes, l->n_dns64_prefixes) {
+                struct in_addr v4;
+
+                if (dns64_extract_ipv4_for_prefix(prefix, addr, &v4) < 0 ||
+                    (best && prefix->length <= best->length))
+                        continue;
+
+                best = prefix;
+                best_v4 = v4;
+        }
+
+        if (!best)
+                return -ENXIO;
+
+        *ret = best_v4;
+        if (ret_prefixlen)
+                *ret_prefixlen = best->length;
+        return 0;
+}
+
+/* Returns the link whose PREF64 embeds addr (extracting the IPv4 into ret_v4),
+ * or NULL if no configured PREF64 covers it. A query bound to an interface only
+ * considers that interface; an unbound query considers every link, which lets
+ * us answer a PTR for an address a different (site-provided) DNS64 handed out. */
+static Link *dns64_ptr_link_for_address(DnsQuery *q, const struct in6_addr *addr, struct in_addr *ret_v4) {
+        assert(q);
+        assert(addr);
+        assert(ret_v4);
+
+        if (q->ifindex > 0) {
+                Link *l = hashmap_get(q->manager->links, INT_TO_PTR(q->ifindex));
+                if (l && dns64_extract_ipv4_for_link(l, addr, ret_v4, NULL) >= 0)
+                        return l;
+                return NULL;
+        }
+
+        Link *best = NULL, *l;
+        uint8_t best_prefixlen = 0;
+        struct in_addr v4;
+        HASHMAP_FOREACH(l, q->manager->links) {
+                uint8_t prefixlen;
+
+                if (dns64_extract_ipv4_for_link(l, addr, &v4, &prefixlen) < 0 ||
+                    (best && prefixlen <= best_prefixlen))
+                        continue;
+
+                best = l;
+                best_prefixlen = prefixlen;
+                *ret_v4 = v4;
+        }
+
+        return best;
+}
+
+static bool dns64_answer_has_direct_ptr(DnsAnswer *answer, const char *name) {
+        DnsResourceRecord *rr;
+        bool found = false;
+
+        assert(name);
+
+        DNS_ANSWER_FOREACH(rr, answer)
+                if (rr->key->class == DNS_CLASS_IN &&
+                    dns_name_equal(dns_resource_key_name(rr->key), name) > 0) {
+                        if (rr->key->type == DNS_TYPE_CNAME)
+                                return false;
+                        if (rr->key->type == DNS_TYPE_PTR)
+                                found = true;
+                }
+
+        return found;
+}
+
+/* Assemble the reverse-DNS64 answer: a synthesized CNAME mapping the queried
+ * IP6.ARPA name to the corresponding IN-ADDR.ARPA name (RFC 6147 §5.3.1
+ * option 2), followed by the records the auxiliary IN-ADDR.ARPA PTR lookup
+ * returned (the real PTR RRs plus any further CNAME/DNAME chain). */
+static int dns64_build_ptr_answer(DnsQuery *q, DnsQuery *aux, DnsAnswer **ret) {
+        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
+        _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *cname = NULL;
+        const char *ip6_name, *in_addr_name;
+        int r;
+
+        assert(q);
+        assert(aux);
+        assert(ret);
+
+        ip6_name = dns_question_first_name(dns_query_question(q));
+        in_addr_name = dns_question_first_name(aux->question_utf8);
+        if (!ip6_name || !in_addr_name)
+                return -EINVAL;
+
+        cname = dns_resource_record_new_full(DNS_CLASS_IN, DNS_TYPE_CNAME, ip6_name);
+        if (!cname)
+                return -ENOMEM;
+
+        cname->cname.name = strdup(in_addr_name);
+        if (!cname->cname.name)
+                return -ENOMEM;
+
+        /* The CNAME is synthesized locally; cap its lifetime like the AAAA path. */
+        cname->ttl = DNS64_SOA_TTL_FALLBACK;
+
+        r = dns_answer_add_extend(&answer, cname, aux->ifindex, DNS_ANSWER_CACHEABLE, NULL);
+        if (r < 0)
+                return r;
+
+        r = dns_answer_extend(&answer, aux->answer);
+        if (r < 0)
+                return r;
+
+        *ret = TAKE_PTR(answer);
+        return 0;
+}
+
+void dns64_on_ptr_query_complete(DnsQuery *aux) {
+        DnsQuery *q = ASSERT_PTR(aux->auxiliary_for);
+        _cleanup_(dns_query_freep) DnsQuery *aux_owned = aux;
+        _cleanup_(dns_answer_unrefp) DnsAnswer *answer = NULL;
+        int r;
+
+        assert(q->n_auxiliary_queries > 0);
+        q->n_auxiliary_queries--;
+        LIST_REMOVE(auxiliary_queries, q->auxiliary_queries, aux);
+        aux->auxiliary_for = NULL;
+
+        if (aux->state != DNS_TRANSACTION_SUCCESS)
+                goto propagate;
+
+        /* RFC 6147 §5.3.1 option 2: only synthesize the CNAME when the
+         * IN-ADDR.ARPA name actually has a PTR, so we never point a CNAME at
+         * nothing. Without one, report the reverse lookup's own outcome. */
+        if (!dns64_answer_has_direct_ptr(aux->answer, dns_question_first_name(aux->question_utf8)))
+                goto propagate;
+
+        r = dns64_build_ptr_answer(q, aux, &answer);
+        if (r < 0)
+                goto error;
+
+        log_debug("DNS64: synthesized reverse CNAME %s -> %s",
+                  dns_question_first_name(dns_query_question(q)),
+                  dns_question_first_name(aux->question_utf8));
+
+        dns_query_reset_answer(q);
+        q->answer = TAKE_PTR(answer);
+        q->answer_rcode = DNS_RCODE_SUCCESS;
+        q->answer_protocol = dns_synthesize_protocol(q->flags);
+        q->answer_family = dns_synthesize_family(q->flags);
+        q->answer_query_flags = dns64_synthesized_query_flags(
+                        q,
+                        aux->answer_query_flags &
+                        (SD_RESOLVED_AUTHENTICATED | SD_RESOLVED_CONFIDENTIAL | SD_RESOLVED_FROM_MASK));
+        q->answer_non_authoritative = true;
+        dns_query_complete(q, DNS_TRANSACTION_SUCCESS);
+        return;
+
+propagate:
+        r = dns64_query_propagate_auxiliary_result(q, aux);
+        if (r < 0)
+                goto error;
+        dns_query_complete(q, aux->state);
+        return;
+
+error:
+        dns64_query_complete_errno(q, r);
+}
+
+/* Called from dns_query_go() before the query is dispatched to any scope. RFC 6147 §5.3.1: for a PTR query
+ * in the IP6.ARPA domain whose address falls under a configured PREF64, synthesize a CNAME to the matching
+ * IN-ADDR.ARPA name (option 2) and resolve that reverse name instead — the IP6.ARPA subtree of a synthetic
+ * prefix has no authority upstream. Returns > 0 if an auxiliary PTR query was started and the caller must
+ * defer completion, 0 if DNS64 does not apply and normal resolution shall proceed. */
+int dns_query_dns64_ptr_redirect(DnsQuery *q) {
+        int r;
+
+        assert(q);
+
+        /* A DNS64 auxiliary query must not itself trigger DNS64. */
+        if (q->auxiliary_for)
+                return 0;
+
+        if (FLAGS_SET(q->flags, SD_RESOLVED_NO_SYNTHESIZE))
+                return 0;
+
+        if (q->request_packet &&
+            DNS_PACKET_CD(q->request_packet) &&
+            dns_packet_do(q->request_packet))
+                return 0;
+
+        if (!q->manager->dns64_enabled)
+                return 0;
+
+        /* Find a class-IN PTR question for a name in the IP6.ARPA domain. */
+        DnsResourceKey *ptr_key = NULL, *k;
+        DNS_QUESTION_FOREACH(k, dns_query_question(q)) {
+                if (k->class != DNS_CLASS_IN || k->type != DNS_TYPE_PTR)
+                        continue;
+
+                r = dns_name_endswith(dns_resource_key_name(k), "ip6.arpa");
+                if (r < 0)
+                        return r;
+                if (r > 0) {
+                        ptr_key = k;
+                        break;
+                }
+        }
+        if (!ptr_key)
+                return 0;
+
+        /* Parse the reversed address out of the QNAME. */
+        union in_addr_union addr;
+        int family;
+        r = dns_name_address(dns_resource_key_name(ptr_key), &family, &addr);
+        if (r < 0)
+                return r;
+        if (r == 0 || family != AF_INET6)
+                return 0;
+
+        /* Does the address fall under any configured PREF64? If so, extract the
+         * embedded IPv4 address. */
+        union in_addr_union v4;
+        Link *l = dns64_ptr_link_for_address(q, &addr.in6, &v4.in);
+        if (!l)
+                return 0;
+
+        /* Resolve the corresponding IN-ADDR.ARPA PTR instead. */
+        _cleanup_(dns_question_unrefp) DnsQuestion *question_ptr = NULL;
+        r = dns_question_new_reverse(&question_ptr, AF_INET, &v4);
+        if (r < 0)
+                return r;
+
+        uint64_t flags = q->flags | SD_RESOLVED_NO_SEARCH | SD_RESOLVED_NO_SYNTHESIZE;
+
+        _cleanup_(dns_query_freep) DnsQuery *aux = NULL;
+        r = dns_query_new(q->manager, &aux, question_ptr, question_ptr, NULL, l->ifindex, flags);
+        if (r < 0)
+                return r;
+
+        /* If the redirection cannot be attempted — e.g. the auxiliary query limit is reached or the lookup
+         * cannot be started — fall back to resolving the IP6.ARPA name normally rather than failing. */
+        r = dns_query_make_auxiliary(aux, q);
+        if (r < 0) {
+                log_debug_errno(r, "DNS64: failed to make auxiliary reverse lookup, resolving IP6.ARPA name directly: %m");
+                return 0;
+        }
+
+        aux->complete = dns64_on_ptr_query_complete;
+
+        log_debug("DNS64: starting auxiliary reverse lookup %s -> %s on interface %d",
+                  dns_resource_key_name(ptr_key),
+                  dns_question_first_name(question_ptr),
+                  l->ifindex);
+
+        r = dns_query_go(aux);
+        if (r < 0) {
+                log_debug_errno(r, "DNS64: failed to start auxiliary reverse lookup, resolving IP6.ARPA name directly: %m");
+                return 0;
+        }
+
+        TAKE_PTR(aux);
+
+        return 1; /* completion deferred */
 }
