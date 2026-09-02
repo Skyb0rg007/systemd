@@ -24,6 +24,7 @@
 #include "fd-util.h"
 #include "hostname-setup.h"
 #include "hostname-util.h"
+#include "in-addr-util.h"
 #include "io-util.h"
 #include "iovec-util.h"
 #include "json-util.h"
@@ -645,6 +646,7 @@ static void manager_set_defaults(Manager *m) {
                 m->cache_max[p] = DEFAULT_CACHE_MAX;
         m->stale_retention_usec = 0;
         m->refuse_record_types = set_free(m->refuse_record_types);
+        m->dns64_enabled = true;
         m->resolv_conf_stat = (struct stat) {};
 }
 
@@ -2070,6 +2072,7 @@ static int dns_configuration_json_append(
                 ResolveSupport llmnr_support,
                 ResolveSupport mdns_support,
                 ResolvConfMode resolv_conf_mode,
+                char **pref64,
                 sd_json_variant **configuration) {
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *dns_servers_json = NULL,
@@ -2155,7 +2158,8 @@ static int dns_configuration_json_append(
                         JSON_BUILD_PAIR_STRING_NON_EMPTY_UNDERSCORIFY("llmnr", resolve_support_to_string(llmnr_support)),
                         JSON_BUILD_PAIR_STRING_NON_EMPTY_UNDERSCORIFY("mDNS", resolve_support_to_string(mdns_support)),
                         JSON_BUILD_PAIR_STRING_NON_EMPTY_UNDERSCORIFY("resolvConfMode", resolv_conf_mode_to_string(resolv_conf_mode)),
-                        JSON_BUILD_PAIR_VARIANT_NON_NULL("scopes", scopes_json));
+                        JSON_BUILD_PAIR_VARIANT_NON_NULL("scopes", scopes_json),
+                        JSON_BUILD_PAIR_STRV_NON_EMPTY("pref64", pref64));
 }
 
 static int global_dns_configuration_json_append(Manager *m, sd_json_variant **configuration) {
@@ -2186,11 +2190,13 @@ static int global_dns_configuration_json_append(Manager *m, sd_json_variant **co
                         m->llmnr_support,
                         m->mdns_support,
                         resolv_conf_mode(),
+                        /* pref64= */ NULL,
                         configuration);
 }
 
 static int link_dns_configuration_json_append(Link *l, sd_json_variant **configuration) {
         _cleanup_set_free_ Set *scopes = NULL;
+        _cleanup_strv_free_ char **pref64 = NULL;
         int r;
 
         assert(l);
@@ -2226,6 +2232,10 @@ static int link_dns_configuration_json_append(Link *l, sd_json_variant **configu
                         return r;
         }
 
+        FOREACH_ARRAY(prefix, l->dns64_prefixes, l->n_dns64_prefixes)
+                if (strv_extendf(&pref64, "%s/%u", IN6_ADDR_TO_STRING(&prefix->address), prefix->length) < 0)
+                        return -ENOMEM;
+
         return dns_configuration_json_append(
                         l->ifname,
                         l->ifindex,
@@ -2243,6 +2253,7 @@ static int link_dns_configuration_json_append(Link *l, sd_json_variant **configu
                         link_get_llmnr_support(l),
                         link_get_mdns_support(l),
                         /* resolv_conf_mode= */ _RESOLV_CONF_MODE_INVALID,
+                        pref64,
                         configuration);
 }
 
@@ -2274,6 +2285,7 @@ static int delegate_dns_configuration_json_append(DnsDelegate *d, sd_json_varian
                         /* llmnr_support= */ _RESOLVE_SUPPORT_INVALID,
                         /* mdns_support= */ _RESOLVE_SUPPORT_INVALID,
                         /* resolv_conf_mode= */ _RESOLV_CONF_MODE_INVALID,
+                        /* pref64= */ NULL,
                         configuration);
 }
 

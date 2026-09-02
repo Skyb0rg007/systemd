@@ -227,4 +227,15 @@
                 <annotate key="org.freedesktop.policykit.owner">unix-user:systemd-resolve</annotate>
         </action>
 
+        <action id="org.freedesktop.resolve1.set-dns64-prefix">
+                <description gettext-domain="systemd">Set DNS64 (NAT64) prefix on a network interface</description>
+                <message gettext-domain="systemd">Authentication is required to set the DNS64 prefix on a network interface.</message>
+                <defaults>
+                        <allow_any>auth_admin</allow_any>
+                        <allow_inactive>auth_admin</allow_inactive>
+                        <allow_active>auth_admin_keep</allow_active>
+                </defaults>
+                <annotate key="org.freedesktop.policykit.owner">unix-user:systemd-resolve</annotate>
+        </action>
+
 </policyconfig>

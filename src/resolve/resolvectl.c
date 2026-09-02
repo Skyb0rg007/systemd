@@ -115,6 +115,7 @@ typedef enum StatusMode {
         STATUS_DNS_OVER_TLS,
         STATUS_DNSSEC,
         STATUS_NTA,
+        STATUS_PREF64,
         _STATUS_MAX,
         _STATUS_INVALID = -EINVAL,
 } StatusMode;
@@ -129,6 +130,7 @@ static const char* const status_mode_json_field_table[_STATUS_MAX] = {
         [STATUS_DNS_OVER_TLS]  = "dnsOverTLS",
         [STATUS_DNSSEC]        = "dnssec",
         [STATUS_NTA]           = "negativeTrustAnchors",
+        [STATUS_PREF64]        = "pref64",
 };
 
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(status_mode_json_field, StatusMode);
@@ -1563,6 +1565,12 @@ static int print_configuration(DNSConfiguration *configuration, StatusMode mode,
 
                 return 0;
 
+        } else if (mode == STATUS_PREF64) {
+                if (global)
+                        return 0;
+
+                return status_print_strv(configuration, configuration->pref64);
+
         } else if (IN_SET(mode, STATUS_LLMNR, STATUS_MDNS, STATUS_DNS_OVER_TLS, STATUS_DNSSEC)) {
                 if (configuration->delegate)
                         return 0;
@@ -1671,6 +1679,14 @@ static int print_configuration(DNSConfiguration *configuration, StatusMode mode,
                 r = table_add_many(table,
                                    TABLE_FIELD, "Default Route",
                                    TABLE_BOOLEAN, configuration->default_route);
+                if (r < 0)
+                        return table_log_add_error(r);
+        }
+
+        if (configuration->ifindex > 0 && !strv_isempty(configuration->pref64)) {
+                r = table_add_many(table,
+                                   TABLE_FIELD, "NAT64 Prefixes (DNS64)",
+                                   TABLE_STRV_WRAPPED, configuration->pref64);
                 if (r < 0)
                         return table_log_add_error(r);
         }
@@ -3194,6 +3210,45 @@ static int verb_log_level(int argc, char *argv[], uintptr_t _data, void *userdat
                         return r;
         } else
                 assert_not_reached();
+
+        return 0;
+}
+
+VERB(verb_pref64, "pref64", "[LINK [PREFIX…]]\0", VERB_ANY, VERB_ANY, 0,
+     "Get/set PREF64 (NAT64 prefixes) on an interface for DNS64 synthesis");
+static int verb_pref64(int argc, char *argv[], uintptr_t _data, void *userdata) {
+        int r;
+
+        if (argc >= 2) {
+                r = ifname_mangle(argv[1]);
+                if (r < 0)
+                        return r;
+        }
+
+        if (arg_ifindex <= 0)
+                return status_all(STATUS_PREF64);
+
+        if (argc < 3)
+                return status_ifindex(arg_ifindex, STATUS_PREF64);
+
+        (void) polkit_agent_open_if_enabled(BUS_TRANSPORT_LOCAL, arg_ask_password);
+
+        _cleanup_(sd_varlink_unrefp) sd_varlink *vl = NULL;
+        r = sd_varlink_connect_address(&vl, "/run/systemd/resolve/io.systemd.Resolve");
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to resolve service /run/systemd/resolve/io.systemd.Resolve: %m");
+
+        char **prefixes = argc == 3 && isempty(argv[2]) ? STRV_EMPTY : argv + 2;
+
+        r = varlink_callbo_and_log(
+                        vl,
+                        "io.systemd.Resolve.SetLinkDNS64Prefixes",
+                        /* ret_reply= */ NULL,
+                        SD_JSON_BUILD_PAIR_INTEGER("ifindex", arg_ifindex),
+                        SD_JSON_BUILD_PAIR_BOOLEAN("allowInteractiveAuthentication", arg_ask_password),
+                        SD_JSON_BUILD_PAIR_STRV("prefixes", prefixes));
+        if (r < 0)
+                return r;
 
         return 0;
 }

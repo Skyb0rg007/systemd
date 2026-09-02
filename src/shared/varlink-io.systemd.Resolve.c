@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "bus-polkit.h"
 #include "resolve-util.h"
 #include "varlink-io.systemd.Resolve.h"
 
@@ -287,7 +288,9 @@ SD_VARLINK_DEFINE_STRUCT_TYPE(
                 SD_VARLINK_FIELD_COMMENT("resolv.conf mode, set for global configuration only."),
                 SD_VARLINK_DEFINE_FIELD_BY_TYPE(resolvConfMode, ResolvConfMode, SD_VARLINK_NULLABLE),
                 SD_VARLINK_FIELD_COMMENT("Array of current DNS scopes."),
-                SD_VARLINK_DEFINE_FIELD_BY_TYPE(scopes, DNSScope, SD_VARLINK_ARRAY|SD_VARLINK_NULLABLE));
+                SD_VARLINK_DEFINE_FIELD_BY_TYPE(scopes, DNSScope, SD_VARLINK_ARRAY|SD_VARLINK_NULLABLE),
+                SD_VARLINK_FIELD_COMMENT("PREF64/NAT64 prefixes configured for DNS64 synthesis on this link, in preference order and CIDR notation."),
+                SD_VARLINK_DEFINE_FIELD(pref64, SD_VARLINK_STRING, SD_VARLINK_ARRAY|SD_VARLINK_NULLABLE));
 
 static SD_VARLINK_DEFINE_METHOD(
                 ResolveRecord,
@@ -298,6 +301,14 @@ static SD_VARLINK_DEFINE_METHOD(
                 SD_VARLINK_DEFINE_INPUT(flags, SD_VARLINK_INT, SD_VARLINK_NULLABLE),
                 SD_VARLINK_DEFINE_OUTPUT_BY_TYPE(rrs, ResolvedRecord, SD_VARLINK_ARRAY),
                 SD_VARLINK_DEFINE_OUTPUT(flags, SD_VARLINK_INT, 0));
+
+static SD_VARLINK_DEFINE_METHOD(
+                SetLinkDNS64Prefixes,
+                VARLINK_DEFINE_POLKIT_INPUT,
+                SD_VARLINK_FIELD_COMMENT("Linux interface index of the link to configure."),
+                SD_VARLINK_DEFINE_INPUT(ifindex, SD_VARLINK_INT, 0),
+                SD_VARLINK_FIELD_COMMENT("PREF64 prefixes in preference order and CIDR notation (e.g. ['64:ff9b::/96']). Pass an empty array to clear."),
+                SD_VARLINK_DEFINE_INPUT(prefixes, SD_VARLINK_STRING, SD_VARLINK_ARRAY));
 
 static SD_VARLINK_DEFINE_METHOD_FULL(
                 BrowseServices,
@@ -348,6 +359,7 @@ static SD_VARLINK_DEFINE_ERROR(ZoneTransfersNotPermitted);
 static SD_VARLINK_DEFINE_ERROR(ResourceRecordTypeObsolete);
 static SD_VARLINK_DEFINE_ERROR(InconsistentServiceRecords);
 static SD_VARLINK_DEFINE_ERROR(ServiceNotProvided);
+static SD_VARLINK_DEFINE_ERROR(NoSuchLink);
 
 SD_VARLINK_DEFINE_INTERFACE(
                 io_systemd_Resolve,
@@ -364,6 +376,8 @@ SD_VARLINK_DEFINE_INTERFACE(
                 &vl_method_BrowseServices,
                 SD_VARLINK_SYMBOL_COMMENT("Current global and per-link DNS configurations."),
                 &vl_method_DumpDNSConfiguration,
+                SD_VARLINK_SYMBOL_COMMENT("Sets the ordered PREF64/NAT64 prefix list on a network interface for DNS64 synthesis."),
+                &vl_method_SetLinkDNS64Prefixes,
                 SD_VARLINK_SYMBOL_COMMENT("The type of protocol."),
                 &vl_type_DNSProtocol,
                 SD_VARLINK_SYMBOL_COMMENT("The mode of DNSOverTLS."),
@@ -420,4 +434,6 @@ SD_VARLINK_DEFINE_INTERFACE(
                 SD_VARLINK_SYMBOL_COMMENT("The DNS resource records of the specified service are not consistent (e.g. lacks a DNS-SD service type when resolved)."),
                 &vl_error_InconsistentServiceRecords,
                 SD_VARLINK_SYMBOL_COMMENT("The service is explicitly not provided on the queried domain (RFC 2782 root domain SRV record)."),
-                &vl_error_ServiceNotProvided);
+                &vl_error_ServiceNotProvided,
+                SD_VARLINK_SYMBOL_COMMENT("The specified network interface does not exist."),
+                &vl_error_NoSuchLink);

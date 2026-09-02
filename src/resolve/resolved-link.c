@@ -15,12 +15,14 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "in-addr-util.h"
 #include "log-link.h"
 #include "mkdir.h"
 #include "netif-util.h"
 #include "parse-util.h"
 #include "resolved-dns-browse-services.h"
 #include "resolved-dns-scope.h"
+#include "resolved-dns64.h"
 #include "resolved-dns-search-domain.h"
 #include "resolved-dns-server.h"
 #include "resolved-link.h"
@@ -79,6 +81,7 @@ void link_flush_settings(Link *l) {
         l->mdns_support = RESOLVE_SUPPORT_YES;
         l->dnssec_mode = _DNSSEC_MODE_INVALID;
         l->dns_over_tls_mode = _DNS_OVER_TLS_MODE_INVALID;
+        link_clear_dns64_prefixes(l);
 
         dns_server_unlink_all(l->dns_servers);
         dns_search_domain_unlink_all(l->search_domains);
@@ -1243,6 +1246,9 @@ static bool link_needs_save(Link *l) {
         if (l->default_route >= 0)
                 return true;
 
+        if (l->n_dns64_prefixes > 0)
+                return true;
+
         return false;
 }
 
@@ -1340,6 +1346,17 @@ int link_save_user(Link *l) {
                 fputc('\n', f);
         }
 
+        if (l->n_dns64_prefixes > 0) {
+                fputs("PREF64=", f);
+                FOREACH_ARRAY(prefix, l->dns64_prefixes, l->n_dns64_prefixes) {
+                        if (prefix != l->dns64_prefixes)
+                                fputc(' ', f);
+
+                        fprintf(f, "%s/%u", IN6_ADDR_TO_STRING(&prefix->address), prefix->length);
+                }
+                fputc('\n', f);
+        }
+
         r = fflush_and_check(f);
         if (r < 0)
                 goto fail;
@@ -1368,7 +1385,8 @@ int link_load_user(Link *l) {
                 *servers = NULL,
                 *domains = NULL,
                 *ntas = NULL,
-                *default_route = NULL;
+                *default_route = NULL,
+                *pref64 = NULL;
 
         ResolveSupport s;
         const char *p;
@@ -1393,7 +1411,8 @@ int link_load_user(Link *l) {
                            "SERVERS", &servers,
                            "DOMAINS", &domains,
                            "NTAS", &ntas,
-                           "DEFAULT_ROUTE", &default_route);
+                           "DEFAULT_ROUTE", &default_route,
+                           "PREF64", &pref64);
         if (r == -ENOENT)
                 return 0;
         if (r < 0)
@@ -1419,6 +1438,25 @@ int link_load_user(Link *l) {
 
         /* Same for DNSOverTLS */
         l->dns_over_tls_mode = dns_over_tls_mode_from_string(dns_over_tls);
+
+        for (p = pref64;;) {
+                _cleanup_free_ char *word = NULL;
+                union in_addr_union prefix;
+                unsigned char prefixlen;
+                int family;
+
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        goto fail;
+                if (r == 0)
+                        break;
+
+                r = in_addr_prefix_from_string_auto(word, &family, &prefix, &prefixlen);
+                if (r >= 0 && family == AF_INET6)
+                        r = link_add_dns64_prefix(l, &prefix.in6, prefixlen);
+                if (r < 0 || family != AF_INET6)
+                        log_link_debug(l, "Ignoring invalid PREF64 value: %s", word);
+        }
 
         for (p = servers;;) {
                 _cleanup_free_ char *word = NULL;
@@ -1484,6 +1522,87 @@ void link_remove_user(Link *l) {
         assert(l->state_file);
 
         (void) unlink(l->state_file);
+}
+
+static bool dns64_prefix_equal(const Dns64Prefix *a, const Dns64Prefix *b) {
+        return a->length == b->length &&
+                memcmp(&a->address, &b->address, sizeof(a->address)) == 0;
+}
+
+int link_set_dns64_prefixes(Link *l, const Dns64Prefix *prefixes, size_t n_prefixes) {
+        _cleanup_free_ Dns64Prefix *copy = NULL;
+        size_t n = 0;
+
+        assert(l);
+        assert(prefixes || n_prefixes == 0);
+
+        if (n_prefixes > LINK_DNS64_PREFIXES_MAX)
+                return -E2BIG;
+
+        if (n_prefixes > 0) {
+                copy = new(Dns64Prefix, n_prefixes);
+                if (!copy)
+                        return -ENOMEM;
+
+                FOREACH_ARRAY(prefix, prefixes, n_prefixes) {
+                        if (!dns64_prefix_valid(&prefix->address, prefix->length))
+                                return -EINVAL;
+
+                        Dns64Prefix normalized = *prefix;
+                        (void) in6_addr_mask(&normalized.address, normalized.length);
+
+                        bool duplicate = false;
+                        FOREACH_ARRAY(existing, copy, n)
+                                if (dns64_prefix_equal(existing, &normalized)) {
+                                        duplicate = true;
+                                        break;
+                                }
+                        if (!duplicate)
+                                copy[n++] = normalized;
+                }
+        }
+
+        free(l->dns64_prefixes);
+        l->dns64_prefixes = TAKE_PTR(copy);
+        l->n_dns64_prefixes = n;
+
+        return 0;
+}
+
+int link_add_dns64_prefix(Link *l, const struct in6_addr *prefix, uint8_t prefixlen) {
+        Dns64Prefix normalized;
+
+        assert(l);
+        assert(prefix);
+
+        if (!dns64_prefix_valid(prefix, prefixlen))
+                return -EINVAL;
+
+        normalized = (Dns64Prefix) {
+                .address = *prefix,
+                .length = prefixlen,
+        };
+        (void) in6_addr_mask(&normalized.address, prefixlen);
+
+        FOREACH_ARRAY(existing, l->dns64_prefixes, l->n_dns64_prefixes)
+                if (dns64_prefix_equal(existing, &normalized))
+                        return 0;
+
+        if (l->n_dns64_prefixes >= LINK_DNS64_PREFIXES_MAX)
+                return -E2BIG;
+
+        if (!GREEDY_REALLOC(l->dns64_prefixes, l->n_dns64_prefixes + 1))
+                return -ENOMEM;
+
+        l->dns64_prefixes[l->n_dns64_prefixes++] = normalized;
+        return 1;
+}
+
+void link_clear_dns64_prefixes(Link *l) {
+        assert(l);
+
+        l->dns64_prefixes = mfree(l->dns64_prefixes);
+        l->n_dns64_prefixes = 0;
 }
 
 bool link_negative_trust_anchor_lookup(Link *l, const char *name) {

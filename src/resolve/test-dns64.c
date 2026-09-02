@@ -4,6 +4,8 @@
 #include <netinet/in.h>
 
 #include "resolved-dns64.h"
+#include "resolved-link.h"
+#include "resolved-manager.h"
 #include "tests.h"
 
 /* RFC 6147 / RFC 6052 test fixtures.
@@ -157,6 +159,57 @@ TEST(dns64_extract_ipv4_invalid_prefix_length) {
                         continue;
                 ASSERT_ERROR(dns64_extract_ipv4(&prefix, pl, &v6, &got), EINVAL);
         }
+}
+
+static void link_set_pref64(Link *l, const char *prefix, uint8_t pl) {
+        Dns64Prefix p = {
+                .address = in6(prefix),
+                .length = pl,
+        };
+        ASSERT_OK(link_set_dns64_prefixes(l, &p, 1));
+}
+
+static void link_add_pref64(Link *l, const char *prefix, uint8_t pl) {
+        struct in6_addr p = in6(prefix);
+        ASSERT_OK_POSITIVE(link_add_dns64_prefix(l, &p, pl));
+}
+
+TEST(link_set_dns64_prefixes_normalizes_and_validates_prefix) {
+        Manager manager = {};
+        _cleanup_(link_freep) Link *link = NULL;
+        struct in6_addr expected;
+        Dns64Prefix prefix;
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+
+        prefix = (Dns64Prefix) { .address = in6("2001:db8:1:2:3:4:5:6"), .length = 64 };
+        ASSERT_OK(link_set_dns64_prefixes(link, &prefix, 1));
+        expected = in6("2001:db8:1:2::");
+        ASSERT_EQ(link->n_dns64_prefixes, (size_t) 1);
+        ASSERT_EQ(memcmp(&link->dns64_prefixes[0].address, &expected, sizeof expected), 0);
+
+        prefix = (Dns64Prefix) { .address = in6("2001:db8:0:0:100::"), .length = 96 };
+        ASSERT_ERROR(link_set_dns64_prefixes(link, &prefix, 1), EINVAL);
+
+        prefix = (Dns64Prefix) { .address = in6("64:ff9b::"), .length = 64 };
+        ASSERT_ERROR(link_set_dns64_prefixes(link, &prefix, 1), EINVAL);
+}
+
+TEST(link_add_dns64_prefix_preserves_order_and_deduplicates) {
+        Manager manager = {};
+        _cleanup_(link_freep) Link *link = NULL;
+        struct in6_addr first = in6("2001:db8:1::"), second = in6("2001:db8:2::");
+
+        ASSERT_OK(link_new(&manager, &link, 1));
+        link_set_pref64(link, "2001:db8:1::", 96);
+        link_add_pref64(link, "2001:db8:2::", 96);
+
+        struct in6_addr duplicate = in6("2001:db8:1::1234");
+        ASSERT_OK(link_add_dns64_prefix(link, &duplicate, 96));
+
+        ASSERT_EQ(link->n_dns64_prefixes, (size_t) 2);
+        ASSERT_EQ(memcmp(&link->dns64_prefixes[0].address, &first, sizeof first), 0);
+        ASSERT_EQ(memcmp(&link->dns64_prefixes[1].address, &second, sizeof second), 0);
 }
 
 DEFINE_TEST_MAIN(LOG_DEBUG);
