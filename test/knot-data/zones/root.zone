@@ -14,3 +14,7 @@ ns1.unsigned.test   A    10.0.0.1
 ns1.unsigned.test   AAAA fd00:dead:beef:cafe::1
 
 test                NS   ns1.unsigned.test
+
+; Insecure delegation of a reverse zone, used to exercise DNS64 reverse (PTR)
+; synthesis (the embedded IPv4 10.0.0.111 reverses to 111.0.0.10.in-addr.arpa).
+0.0.10.in-addr.arpa NS   ns1.unsigned.test

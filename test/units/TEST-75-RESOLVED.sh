@@ -1718,6 +1718,64 @@ EOF
     systemctl reload systemd-resolved
 }
 
+testcase_dns64() {
+    : "--- DNS64 (RFC 6147) ---"
+
+    # Use a network-specific prefix because RFC 6052 prohibits mapping the
+    # private test address below with the Well-Known Prefix.
+    resolvectl pref64 dns0 2001:db8:64::/96 2001:db8:65::/96
+    run resolvectl pref64 dns0
+    grep -qF "2001:db8:64::/96" "$RUN_OUT"
+    grep -qF "2001:db8:65::/96" "$RUN_OUT"
+    run resolvectl status dns0
+    grep -qF "2001:db8:64::/96" "$RUN_OUT"
+
+    # Forward synthesis: mail.unsigned.test has an A (10.0.0.111) but no AAAA,
+    # so an AAAA query must be synthesized by embedding the IPv4 address into
+    # the prefix -> 2001:db8:64::a00:6f.
+    run resolvectl query --type AAAA mail.unsigned.test
+    grep -qiF "2001:db8:64::a00:6f" "$RUN_OUT"
+    grep -qiF "2001:db8:65::a00:6f" "$RUN_OUT"
+
+    # RFC 8880 requires the discovery name to be answered locally with the
+    # configured prefix rather than forwarded to authoritative servers.
+    run resolvectl query --type AAAA ipv4only.arpa
+    grep -qiF "2001:db8:64::c000:aa" "$RUN_OUT"
+    grep -qiF "2001:db8:64::c000:ab" "$RUN_OUT"
+    grep -qiF "2001:db8:65::c000:aa" "$RUN_OUT"
+    grep -qiF "2001:db8:65::c000:ab" "$RUN_OUT"
+
+    # A name that already has a real AAAA must NOT be synthesized.
+    run resolvectl query --type AAAA ns1.unsigned.test
+    grep -qiF "fd00:dead:beef:cafe::1" "$RUN_OUT"
+    (! grep -qiF "2001:db8:64::" "$RUN_OUT")
+
+    # Reverse synthesis (RFC 6147 §5.3.1): a PTR query for the synthesized
+    # address is answered via a synthesized CNAME to the corresponding
+    # in-addr.arpa name, which resolves to the real PTR (mail.unsigned.test).
+    run resolvectl query 2001:db8:64::a00:6f
+    grep -qiF "mail.unsigned.test" "$RUN_OUT"
+
+    # The global switch disables synthesis regardless of the configured prefix:
+    # the AAAA query then has no answer (no real AAAA and no synthesis).
+    mkdir -p /run/systemd/resolved.conf.d
+    cat >/run/systemd/resolved.conf.d/dns64.conf <<EOF
+[Resolve]
+DNS64=no
+EOF
+    systemctl reload systemd-resolved
+    run resolvectl query --type AAAA mail.unsigned.test || true
+    (! grep -qiF "2001:db8:64::a00:6f" "$RUN_OUT")
+    rm -f /run/systemd/resolved.conf.d/dns64.conf
+    systemctl reload systemd-resolved
+
+    # Clean up the prefix so later tests are unaffected.
+    resolvectl pref64 dns0 ""
+    run resolvectl pref64 dns0
+    (! grep -qF "2001:db8:64::/96" "$RUN_OUT")
+    (! grep -qF "2001:db8:65::/96" "$RUN_OUT")
+}
+
 # PRE-SETUP
 systemctl unmask systemd-resolved.service
 systemctl enable --now systemd-resolved.service
