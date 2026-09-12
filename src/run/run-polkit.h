@@ -3,6 +3,7 @@
 
 #include "forward.h"
 
-int polkit_check_authorization(sd_bus *bus, PolkitFlags flags, char **ret_tmpauthz_id);
+int polkit_check_authorization(sd_bus *bus, const PidRef *subject, PolkitFlags flags, char **ret_tmpauthz_id);
+int polkit_revoke_temporary_authorization_for_subject(sd_bus *bus, const PidRef *subject);
 int polkit_revoke_temporary_authorization_by_id(sd_bus *bus, const char *id);
 int polkit_revoke_temporary_authorizations(sd_bus *bus);

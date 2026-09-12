@@ -70,6 +70,7 @@
 #include "virt.h"
 
 static bool arg_ask_password = true;
+static bool arg_password_from_stdin = false;
 static bool arg_scope = false;
 static bool arg_remain_after_exit = false;
 static bool arg_no_block = false;
@@ -795,6 +796,10 @@ static int parse_argv_sudo_mode(int argc, char *argv[]) {
 
                 OPTION('n', "non-interactive", NULL, "Do not prompt for password"):
                         arg_ask_password = false;
+                        break;
+
+                OPTION('S', "stdin", NULL, "Read password from standard input"):
+                        arg_password_from_stdin = true;
                         break;
 
                 OPTION_COMMON_NO_PAGER:
@@ -1587,6 +1592,14 @@ static int make_unit_name(UnitType t, char **ret) {
         return 0;
 }
 
+static int open_polkit_agent(void) {
+        /* --stdin (run0 only) reads responses from stdin instead of the TTY. */
+        return polkit_agent_open_if_enabled_full(
+                        arg_transport,
+                        arg_ask_password,
+                        arg_password_from_stdin ? STDIN_FILENO : -EBADF);
+}
+
 static int connect_bus(sd_bus **ret) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         int r;
@@ -2294,7 +2307,7 @@ static int start_transient_service(sd_bus *bus) {
 
         assert(bus);
 
-        (void) polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
+        (void) open_polkit_agent();
         (void) ask_password_agent_open_if_enabled(arg_transport, arg_ask_password);
 
         _cleanup_(run_context_done) RunContext c = {
@@ -2545,7 +2558,7 @@ static int start_transient_scope(sd_bus *bus) {
                         return r;
         }
 
-        (void) polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
+        (void) open_polkit_agent();
         (void) ask_password_agent_open_if_enabled(arg_transport, arg_ask_password);
 
         for (;;) {
@@ -2889,7 +2902,7 @@ static int start_transient_trigger(sd_bus *bus, const char *suffix) {
         if (r < 0)
                 return r;
 
-        (void) polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
+        (void) open_polkit_agent();
         (void) ask_password_agent_open_if_enabled(arg_transport, arg_ask_password);
 
         r = bus_call_with_hint(bus, m, suffix + 1, &reply);
@@ -2937,15 +2950,15 @@ static bool shall_make_executable_absolute(void) {
         return true;
 }
 
-static int polkit_validate(sd_bus *bus) {
+static int polkit_validate(sd_bus *bus, const PidRef *subject) {
         PolkitFlags flags = POLKIT_ALWAYS_QUERY;
         int r;
 
         if (arg_ask_password)
                 flags |= POLKIT_ALLOW_INTERACTIVE;
 
-        (void) polkit_agent_open_if_enabled(arg_transport, arg_ask_password);
-        r = polkit_check_authorization(bus, (uint32_t) (flags & _POLKIT_MASK_PUBLIC), NULL);
+        (void) open_polkit_agent();
+        r = polkit_check_authorization(bus, subject, (uint32_t) (flags & _POLKIT_MASK_PUBLIC), NULL);
         if (r < 0)
                 return r;
         if (r == 0) /* not authorized */
@@ -2954,8 +2967,132 @@ static int polkit_validate(sd_bus *bus) {
         return 0;
 }
 
+static bool shall_isolate_polkit_subject(void) {
+        /* True when we'll be running our own stdin polkit agent, and hence want its prompt to reliably
+         * happen. --validate is exempt: its job is to leave a cached authorization for later invocations. */
+        return arg_password_from_stdin &&
+                arg_ask_password &&
+                arg_transport == BUS_TRANSPORT_LOCAL &&
+                geteuid() != 0 &&
+                !arg_validate;
+}
+
+/* Signals relayed to the child; also the ones whose death we mimic if the child dies from one. */
+static const int relay_signals[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2 };
+
+static int on_relay_signal(sd_event_source *s, const struct signalfd_siginfo *si, void *userdata) {
+        PidRef *child = ASSERT_PTR(userdata);
+        int r;
+
+        assert(si);
+
+        /* Terminal-generated signals (^C, hang-up, …) already reach the child via the process group. Only
+         * relay what was sent to us explicitly, e.g. via kill(1). */
+        if (si->ssi_code == SI_KERNEL)
+                return 0;
+
+        r = pidref_kill(child, si->ssi_signo);
+        if (r < 0 && r != -ESRCH)
+                log_debug_errno(r, "Failed to relay %s to child process, ignoring: %m", signal_to_string(si->ssi_signo));
+
+        return 0;
+}
+
+static int on_child_exit(sd_event_source *s, const siginfo_t *si, void *userdata) {
+        siginfo_t *ret = ASSERT_PTR(userdata);
+
+        assert(si);
+
+        *ret = *si;
+        return sd_event_exit(sd_event_source_get_event(s), 0);
+}
+
+static int wait_for_child(PidRef *child, siginfo_t *ret) {
+        _cleanup_(sd_event_unrefp) sd_event *event = NULL;
+        siginfo_t si = {};
+        int r;
+
+        assert(pidref_is_set(child));
+        assert(ret);
+
+        r = sd_event_new(&event);
+        if (r < 0)
+                return log_error_errno(r, "Failed to allocate event loop: %m");
+
+        FOREACH_ELEMENT(sig, relay_signals) {
+                r = sd_event_add_signal(event, /* ret= */ NULL, *sig | SD_EVENT_SIGNAL_PROCMASK, on_relay_signal, child);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to add event source for %s: %m", signal_to_string(*sig));
+        }
+
+        r = event_add_child_pidref(event, /* ret= */ NULL, child, WEXITED, on_child_exit, &si);
+        if (r < 0)
+                return log_error_errno(r, "Failed to add child event source: %m");
+
+        r = sd_event_loop(event);
+        if (r < 0)
+                return log_error_errno(r, "Failed to run event loop: %m");
+
+        *ret = si;
+        return 0;
+}
+
+static int fork_isolated_polkit_subject(int *ret_exit_status) {
+        _cleanup_(pidref_done) PidRef child = PIDREF_NULL;
+        siginfo_t si;
+        int r;
+
+        assert(ret_exit_status);
+
+        /* polkit (≥ 126) shares a cached authorization with any process matching the acquirer's uid, parent,
+         * cgroup and terminal, with no per-request opt-out. That would make --stdin consume the password line
+         * only sometimes. Running in a child of our own gives us a different parent, so no cached
+         * authorization applies to or from us; nothing is revoked, so other invocations keep what they cached.
+         *
+         * Returns 0 in the child; > 0 in the parent once the child exited, with its exit status in
+         * ret_exit_status. */
+
+        r = pidref_safe_fork_full(
+                        /* name= */ NULL,
+                        /* stdio_fds= */ NULL,
+                        /* except_fds= */ NULL,
+                        /* n_except_fds= */ 0,
+                        FORK_DEATHSIG_SIGTERM|FORK_REOPEN_LOG|FORK_LOG,
+                        &child);
+        if (r < 0)
+                return r;
+        if (r == 0) /* Child */
+                return 0;
+
+        r = wait_for_child(&child, &si);
+        if (r < 0)
+                return r;
+
+        if (si.si_code == CLD_EXITED) {
+                *ret_exit_status = si.si_status;
+                return 1;
+        }
+
+        if (!IN_SET(si.si_code, CLD_KILLED, CLD_DUMPED))
+                return log_error_errno(SYNTHETIC_ERRNO(EPROTO), "Child process exited in unexpected way.");
+
+        /* Mimic death by a signal we might have relayed; report anything else (e.g. a crash) as a failure. */
+        FOREACH_ELEMENT(sig, relay_signals)
+                if (*sig == si.si_status) {
+                        log_debug("Child process died from %s, following suit.", signal_to_string(*sig));
+                        (void) default_signals(*sig);
+                        (void) raise(*sig);
+                        break;
+                }
+
+        log_error("Child process died from %s.", signal_to_string(si.si_status));
+        *ret_exit_status = EXIT_EXCEPTION;
+        return 1;
+}
+
 static int run(int argc, char* argv[]) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        _cleanup_(pidref_done) PidRef polkit_subject = PIDREF_NULL;
         int r;
 
         log_setup();
@@ -3014,6 +3151,22 @@ static int run(int argc, char* argv[]) {
                         return log_oom();
         }
 
+        if (shall_isolate_polkit_subject()) {
+                int exit_status;
+
+                r = fork_isolated_polkit_subject(&exit_status);
+                if (r < 0)
+                        return r;
+                if (r > 0) /* Parent */
+                        return exit_status;
+
+                /* Let --reset-timestamp act on our parent, i.e. what the user actually invoked. */
+                r = pidref_set_parent(&polkit_subject);
+        } else
+                r = pidref_set_self(&polkit_subject);
+        if (r < 0)
+                return log_error_errno(r, "Failed to acquire polkit subject: %m");
+
         r = connect_bus(&bus);
         if (r < 0)
                 return r;
@@ -3023,28 +3176,38 @@ static int run(int argc, char* argv[]) {
                 if (r < 0)
                         return r;
                 if (arg_validate)
-                        return polkit_validate(bus);
+                        return polkit_validate(bus, &polkit_subject);
                 if (arg_default_command)
                         return 0;
         } else if (arg_reset_timestamp) {
-                _cleanup_free_ char *tmpauthz_id = NULL;
-                const PolkitFlags flags = POLKIT_ALWAYS_QUERY;
-                r = polkit_check_authorization(bus, (uint32_t) (flags & _POLKIT_MASK_PUBLIC), &tmpauthz_id);
+                r = polkit_revoke_temporary_authorization_for_subject(bus, &polkit_subject);
                 if (r < 0)
                         return r;
-                if (r > 0 && tmpauthz_id) {
-                        r = polkit_revoke_temporary_authorization_by_id(bus, tmpauthz_id);
-                        if (r < 0)
-                                return r;
-                }
                 if (arg_validate)
-                        return polkit_validate(bus);
+                        return polkit_validate(bus, &polkit_subject);
                 if (arg_default_command)
                         return 0;
         }
 
         if (arg_validate)
-                return polkit_validate(bus);
+                return polkit_validate(bus, &polkit_subject);
+
+        if (shall_isolate_polkit_subject()) {
+                /* Safety net: revoke any cached authorization that would apply to us despite the above, so
+                 * that authentication (and hence consuming the stdin password) reliably takes place. */
+                _cleanup_(pidref_done) PidRef self = PIDREF_NULL;
+
+                r = pidref_set_self(&self);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to acquire pidref of ourselves: %m");
+
+                r = polkit_revoke_temporary_authorization_for_subject(bus, &self);
+                if (r < 0)
+                        return r;
+                if (r > 0)
+                        log_debug("Revoked cached polkit authorization that would have applied to us, in order to enforce authentication.");
+        }
+
         if (arg_scope)
                 return start_transient_scope(bus);
         if (arg_path_property)

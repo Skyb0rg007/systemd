@@ -8,22 +8,25 @@
 #include "bus-error.h"
 #include "bus-polkit.h"
 #include "bus-util.h"
-#include "fd-util.h"
-#include "pidfd-util.h"
-#include "process-util.h"
+#include "format-util.h"
+#include "pidref.h"
 #include "run-polkit.h"
+#include "string-util.h"
 #include "user-util.h"
 
-int polkit_check_authorization(sd_bus *bus, PolkitFlags flags, char **ret_tmpauthz_id) {
+int polkit_check_authorization(sd_bus *bus, const PidRef *subject, PolkitFlags flags, char **ret_tmpauthz_id) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        pid_t pid;
-        _cleanup_close_ int pidfd = -EBADF;
         _cleanup_free_ char *tmpauthz_id = NULL;
         int is_authorized, is_challenge;
         int r;
 
         assert(bus);
+        assert(pidref_is_set(subject));
+
+        /* Polkit requires a pidfd to honor temporary authorizations */
+        if (subject->fd < 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "No pidfd available for polkit subject " PID_FMT ".", subject->pid);
 
         r = sd_bus_message_new_method_call(bus, &m,
                         "org.freedesktop.PolicyKit1",
@@ -33,15 +36,8 @@ int polkit_check_authorization(sd_bus *bus, PolkitFlags flags, char **ret_tmpaut
         if (r < 0)
                 return bus_log_create_error(r);
 
-        pid = getpid_cached();
-
-        /* Polkit requires pidfd to honor temporary authorizations */
-        pidfd = pidfd_open(pid, 0);
-        if (pidfd < 0)
-                return log_debug_errno(errno, "pidfd_open failed: %m");
-
-        r = sd_bus_message_append(m, "(sa{sv})s", "unix-process", 4, "pid", "u", (uint32_t) pid,
-                        "start-time", "t", UINT64_C(0), "uid", "i", (uint32_t) geteuid(), "pidfd", "h", pidfd,
+        r = sd_bus_message_append(m, "(sa{sv})s", "unix-process", 4, "pid", "u", (uint32_t) subject->pid,
+                        "start-time", "t", UINT64_C(0), "uid", "i", (uint32_t) geteuid(), "pidfd", "h", subject->fd,
                         "org.freedesktop.systemd1.manage-units");
         if (r < 0)
                 return bus_log_create_error(r);
@@ -101,6 +97,29 @@ int polkit_check_authorization(sd_bus *bus, PolkitFlags flags, char **ret_tmpaut
                 *ret_tmpauthz_id = TAKE_PTR(tmpauthz_id);
 
         return is_authorized;
+}
+
+int polkit_revoke_temporary_authorization_for_subject(sd_bus *bus, const PidRef *subject) {
+        _cleanup_free_ char *tmpauthz_id = NULL;
+        int r;
+
+        assert(bus);
+        assert(pidref_is_set(subject));
+
+        /* Revokes the temporary authorization polkit would currently apply to the specified subject, if there
+         * is any. Returns > 0 if one was revoked, 0 if there was none. */
+
+        r = polkit_check_authorization(bus, subject, POLKIT_ALWAYS_QUERY & _POLKIT_MASK_PUBLIC, &tmpauthz_id);
+        if (r < 0)
+                return r;
+        if (r == 0 || !tmpauthz_id)
+                return 0;
+
+        r = polkit_revoke_temporary_authorization_by_id(bus, tmpauthz_id);
+        if (r < 0)
+                return r;
+
+        return 1;
 }
 
 int polkit_revoke_temporary_authorization_by_id(sd_bus *bus, const char *id) {
