@@ -370,6 +370,53 @@ if [[ -e /usr/lib/pam.d/systemd-run0 ]] || [[ -e /etc/pam.d/systemd-run0 ]]; the
     run0 -u testuser --empower touch /run/empower
     assert_eq "$(stat -c "%U" /run/empower)" testuser
     rm /run/empower
+
+    # Check that --stdin reads authentication responses from stdin, like sudo -S does
+    if [[ -e /etc/pam.d/polkit-1 ]] && systemctl start polkit.service; then
+        mkdir -p /etc/polkit-1/rules.d
+        cat >/etc/polkit-1/rules.d/run0-stdin-test.rules <<'EOF'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" && subject.user == "testuser")
+        return polkit.Result.AUTH_SELF;
+});
+EOF
+        systemctl try-reload-or-restart polkit.service
+
+        TESTUSER_SHADOW="$(getent shadow testuser | cut -d: -f2)"
+        # SHA-512 crypt hash of "run0stdin"
+        usermod -p '$6$run0stdin$qJlltDzXy24Kj8FxAGVaiK8fU.yBkCAGweEB2oqePtnG.EGQzbxg0P68w/thOTi3ARHhm7EE6ftOnTpz.U1V11' testuser
+
+        run0_as_testuser() {
+            systemd-run -M testuser@.host --user --pipe --wait --quiet -- run0 "$@"
+        }
+
+        # Without --stdin there's no TTY and hence no way to authenticate
+        (! run0_as_testuser id -u </dev/null)
+        # With --stdin the password is read from stdin, and only that line is consumed
+        assert_eq "$(echo run0stdin | run0_as_testuser --stdin id -u)" "0"
+        assert_eq "$(printf 'run0stdin\nhello\n' | run0_as_testuser -S cat)" "hello"
+        # Wrong or missing password
+        (! echo wrongpassword | run0_as_testuser --stdin id -u)
+        (! run0_as_testuser --stdin id -u </dev/null)
+        # The exit status of the command is propagated
+        rc=0
+        echo run0stdin | run0_as_testuser --stdin sh -c 'exit 3' || rc=$?
+        assert_eq "$rc" "3"
+
+        # With --stdin retained authorizations are never used, i.e. every invocation consumes the password
+        # line, even if polkit would retain the authorization
+        sed -i 's/AUTH_SELF;/AUTH_SELF_KEEP;/' /etc/polkit-1/rules.d/run0-stdin-test.rules
+        systemctl try-reload-or-restart polkit.service
+        for _ in 1 2; do
+            assert_eq "$(printf 'run0stdin\nhello\n' | run0_as_testuser -S cat)" "hello"
+        done
+        # --reset-timestamp can still be combined with it
+        assert_eq "$(printf 'run0stdin\nhello\n' | run0_as_testuser -kS cat)" "hello"
+
+        usermod -p "$TESTUSER_SHADOW" testuser
+        rm -f /etc/polkit-1/rules.d/run0-stdin-test.rules
+        systemctl try-reload-or-restart polkit.service
+    fi
 fi
 
 # Tests whether intermediate disconnects corrupt us (modified testcase from https://github.com/systemd/systemd/issues/27204)
