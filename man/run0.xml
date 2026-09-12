@@ -377,6 +377,39 @@
         <xi:include href="version-info.xml" xpointer="v262"/></listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><option>-S</option></term>
+        <term><option>--stdin</option></term>
+
+        <listitem><para>Read responses to authentication prompts from standard input instead of the
+        terminal. Each prompt consumes one line of input (i.e. usually a single password, but
+        multi-factor authentication stacks might ask for more). Everything after the consumed lines remains
+        available to the invoked command.</para>
+
+        <para>To keep the number of consumed lines predictable, temporary authorizations polkit retained from
+        earlier invocations (see <option>--validate</option>) are never used in this mode, and the
+        authorization acquired this way is not retained for other invocations either. Unlike
+        <option>--reset-timestamp</option> this does not revoke anything: other invocations from the same
+        terminal keep whatever authorization they retained. Note that no input is consumed if no
+        authentication is necessary at all, for example because the invoking user is already privileged or
+        the polkit policy grants the action without authentication; the password line is then passed to the
+        command as regular input. When combined with <option>--validate</option> retained authorizations are
+        used and refreshed as usual.</para>
+
+        <para>This is primarily useful for invoking <command>run0</command> without a controlling terminal,
+        for example via <command>ssh</command> without a pseudo TTY:</para>
+
+        <programlisting>echo "$PASSWORD" | ssh host run0 --stdin id -u</programlisting>
+
+        <para>This is implemented via a private polkit authentication agent that answers PAM prompts with the
+        supplied input, and hence requires polkit's <filename>polkit-agent-helper-1</filename> to be
+        available on the system. To keep retained authorizations out of the picture, <command>run0</command>
+        does its actual work in a child process of its own in this mode, which is what polkit sees as the
+        requesting process.</para>
+
+        <xi:include href="version-info.xml" xpointer="v262"/></listitem>
+      </varlistentry>
+
       <xi:include href="standard-options.xml" xpointer="no-ask-password" />
       <xi:include href="standard-options.xml" xpointer="help" />
       <xi:include href="standard-options.xml" xpointer="version-V" />
