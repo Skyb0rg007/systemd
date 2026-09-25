@@ -706,6 +706,23 @@ TEST(dns_query_string_request_address) {
 }
 
 /* ================================================================
+ * validate_and_mangle_query_flags()
+ * ================================================================ */
+
+TEST(validate_and_mangle_query_flags_validation) {
+        Manager manager = {};
+        uint64_t flags;
+
+        flags = SD_RESOLVED_VALIDATE;
+        ASSERT_OK(validate_and_mangle_query_flags(&manager, &flags, "www.example.com", SD_RESOLVED_NO_SEARCH));
+        ASSERT_EQ(flags, SD_RESOLVED_VALIDATE|SD_RESOLVED_PROTOCOLS_ALL);
+
+        /* Requesting validation and turning it off at the same time makes no sense */
+        flags = SD_RESOLVED_VALIDATE|SD_RESOLVED_NO_VALIDATE;
+        ASSERT_ERROR(validate_and_mangle_query_flags(&manager, &flags, "www.example.com", SD_RESOLVED_NO_SEARCH), EINVAL);
+}
+
+/* ================================================================
  * dns_query_go()
  * ================================================================ */
 

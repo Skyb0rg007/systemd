@@ -649,6 +649,56 @@ TEST(dns_cache_lookup_success) {
         ASSERT_TRUE(dns_answer_contains(ret_answer, rr));
 }
 
+TEST(dns_cache_lookup_validate) {
+        _cleanup_(dns_cache_unrefp) DnsCache cache = new_cache();
+        _cleanup_(put_args_unrefp) PutArgs put_args = mk_put_args();
+        _cleanup_(dns_answer_unrefp) DnsAnswer *ret_answer = NULL;
+        _cleanup_(dns_packet_unrefp) DnsPacket *ret_full_packet = NULL;
+        _cleanup_(dns_resource_key_unrefp) DnsResourceKey *key = NULL;
+        DnssecResult ret_dnssec_result;
+        uint64_t ret_query_flags;
+        int ret_rcode;
+
+        /* Data acquired without validation (e.g. in DNSSEC=on-request mode) must not be used to answer
+         * lookups requesting validation. */
+        put_args.key = dns_resource_key_new(DNS_CLASS_IN, DNS_TYPE_A, "www.example.com");
+        ASSERT_NOT_NULL(put_args.key);
+        put_args.query_flags = 0;
+        put_args.dnssec_result = _DNSSEC_RESULT_INVALID;
+        answer_add_a(&put_args, put_args.key, 0xc0a8017f, 3600, DNS_ANSWER_CACHEABLE);
+        ASSERT_OK(cache_put(&cache, &put_args));
+        ASSERT_EQ(dns_cache_size(&cache), 1u);
+
+        key = dns_resource_key_new(DNS_CLASS_IN, DNS_TYPE_A, "www.example.com");
+        ASSERT_NOT_NULL(key);
+
+        ASSERT_OK_ZERO(dns_cache_lookup(&cache, key, SD_RESOLVED_VALIDATE, &ret_rcode, &ret_answer, &ret_full_packet, &ret_query_flags, &ret_dnssec_result));
+        ASSERT_EQ(cache.n_hit, 0u);
+        ASSERT_EQ(cache.n_miss, 1u);
+
+        ASSERT_OK_POSITIVE(dns_cache_lookup(&cache, key, /* query_flags= */ 0, &ret_rcode, &ret_answer, &ret_full_packet, &ret_query_flags, &ret_dnssec_result));
+        ASSERT_EQ(cache.n_hit, 1u);
+        ASSERT_FALSE(FLAGS_SET(ret_query_flags, SD_RESOLVED_AUTHENTICATED));
+        ret_answer = dns_answer_unref(ret_answer);
+
+        /* Once validated data is put in the cache, it replaces the unvalidated data, and may be used */
+        put_args.answer = dns_answer_unref(put_args.answer);
+        put_args.answer = dns_answer_new(0);
+        ASSERT_NOT_NULL(put_args.answer);
+        put_args.query_flags = SD_RESOLVED_AUTHENTICATED;
+        put_args.dnssec_result = DNSSEC_VALIDATED;
+        answer_add_a(&put_args, put_args.key, 0xc0a8017f, 3600, DNS_ANSWER_CACHEABLE|DNS_ANSWER_AUTHENTICATED);
+        ASSERT_OK(cache_put(&cache, &put_args));
+        ASSERT_EQ(dns_cache_size(&cache), 1u);
+
+        ASSERT_OK_POSITIVE(dns_cache_lookup(&cache, key, SD_RESOLVED_VALIDATE, &ret_rcode, &ret_answer, &ret_full_packet, &ret_query_flags, &ret_dnssec_result));
+        ASSERT_EQ(cache.n_hit, 2u);
+        ASSERT_EQ(ret_rcode, DNS_RCODE_SUCCESS);
+        ASSERT_TRUE(FLAGS_SET(ret_query_flags, SD_RESOLVED_AUTHENTICATED));
+        ASSERT_EQ(ret_dnssec_result, DNSSEC_VALIDATED);
+        ASSERT_EQ(dns_answer_size(ret_answer), 1u);
+}
+
 TEST(dns_cache_lookup_clamp_ttl) {
         _cleanup_(dns_cache_unrefp) DnsCache cache = new_cache();
         _cleanup_(put_args_unrefp) PutArgs put_args = mk_put_args();

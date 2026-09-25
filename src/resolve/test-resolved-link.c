@@ -336,4 +336,133 @@ TEST(link_allocate_scopes_mdns_ipv6) {
         ASSERT_EQ(env.link->mdns_ipv6_scope->family, AF_INET6);
 }
 
+/* ================================================================
+ * dns_server_possible_feature_level()
+ * ================================================================ */
+
+TEST(dns_server_possible_feature_level_dnssec_on_request) {
+        _cleanup_(link_alloc_env_teardown) LinkAllocEnv env = {};
+
+        link_alloc_env_setup(&env, AF_INET, DNS_SERVER_LINK);
+
+        /* In DNSSEC=on-request mode, the DNSSEC feature levels are not probed, as only lookups requesting
+         * validation use them */
+        env.link->dnssec_mode = DNSSEC_ON_REQUEST;
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_EDNS0);
+
+        /* … and responses to those don't bump the feature level used by all other lookups */
+        dns_server_packet_received(env.server, IPPROTO_UDP, DNS_SERVER_FEATURE_LEVEL_DO, 512);
+        ASSERT_EQ(env.server->verified_feature_level, DNS_SERVER_FEATURE_LEVEL_DO);
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_EDNS0);
+
+        /* In the other DNSSEC modes they are */
+        env.link->dnssec_mode = DNSSEC_ALLOW_DOWNGRADE;
+        dns_server_reset_features(env.server);
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_DO);
+        dns_server_packet_received(env.server, IPPROTO_UDP, DNS_SERVER_FEATURE_LEVEL_DO, 512);
+        ASSERT_EQ(env.server->verified_feature_level, DNS_SERVER_FEATURE_LEVEL_DO);
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_DO);
+}
+
+TEST(dns_server_possible_feature_level_dnssec_turned_off) {
+        _cleanup_(link_alloc_env_teardown) LinkAllocEnv env = {};
+
+        link_alloc_env_setup(&env, AF_INET, DNS_SERVER_LINK);
+
+        env.link->dnssec_mode = DNSSEC_ALLOW_DOWNGRADE;
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_DO);
+        dns_server_packet_received(env.server, IPPROTO_UDP, DNS_SERVER_FEATURE_LEVEL_DO, 512);
+        ASSERT_EQ(env.server->verified_feature_level, DNS_SERVER_FEATURE_LEVEL_DO);
+
+        /* A previously verified DNSSEC feature level must not be used once DNSSEC is turned off */
+        env.link->dnssec_mode = DNSSEC_NO;
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_EDNS0);
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_EDNS0);
+}
+
+/* ================================================================
+ * dns_server_packet_rrsig_missing()
+ * ================================================================ */
+
+TEST(dns_server_packet_rrsig_missing_dnssec_on_request) {
+        _cleanup_(link_alloc_env_teardown) LinkAllocEnv env = {};
+
+        link_alloc_env_setup(&env, AF_INET, DNS_SERVER_LINK);
+
+        /* In DNSSEC=on-request mode missing RRSIGs in responses to lookups requesting validation don't
+         * make the server unsuitable for DNSSEC RR lookups of all other clients… */
+        env.link->dnssec_mode = DNSSEC_ON_REQUEST;
+        ASSERT_TRUE(dns_server_dnssec_supported(env.server));
+        dns_server_packet_rrsig_missing(env.server, DNS_SERVER_FEATURE_LEVEL_DO);
+        ASSERT_FALSE(env.server->packet_rrsig_missing);
+        ASSERT_TRUE(dns_server_dnssec_supported(env.server));
+
+        /* … while they do in DNSSEC=allow-downgrade mode */
+        env.link->dnssec_mode = DNSSEC_ALLOW_DOWNGRADE;
+        dns_server_reset_features(env.server);
+        ASSERT_TRUE(dns_server_dnssec_supported(env.server));
+        dns_server_packet_rrsig_missing(env.server, DNS_SERVER_FEATURE_LEVEL_DO);
+        ASSERT_TRUE(env.server->packet_rrsig_missing);
+        ASSERT_FALSE(dns_server_dnssec_supported(env.server));
+}
+
+/* ================================================================
+ * dns_server_packet_bad_opt()
+ * ================================================================ */
+
+TEST(dns_server_packet_bad_opt_dnssec_on_request) {
+        _cleanup_(link_alloc_env_teardown) LinkAllocEnv env = {};
+
+        link_alloc_env_setup(&env, AF_INET, DNS_SERVER_LINK);
+
+        /* In DNSSEC=on-request mode a missing OPT RR in responses to lookups requesting validation doesn't
+         * downgrade the feature level used by all other lookups… */
+        env.link->dnssec_mode = DNSSEC_ON_REQUEST;
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_EDNS0);
+        dns_server_packet_bad_opt(env.server, DNS_SERVER_FEATURE_LEVEL_DO);
+        ASSERT_FALSE(env.server->packet_bad_opt);
+        ASSERT_TRUE(dns_server_dnssec_supported(env.server));
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_EDNS0);
+
+        /* … while a missing OPT RR in responses to the other lookups does */
+        dns_server_packet_bad_opt(env.server, DNS_SERVER_FEATURE_LEVEL_EDNS0);
+        ASSERT_TRUE(env.server->packet_bad_opt);
+        ASSERT_FALSE(dns_server_dnssec_supported(env.server));
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_UDP);
+
+        /* In DNSSEC=allow-downgrade mode it always does */
+        env.link->dnssec_mode = DNSSEC_ALLOW_DOWNGRADE;
+        dns_server_reset_features(env.server);
+        ASSERT_EQ(dns_server_possible_feature_level(env.server), DNS_SERVER_FEATURE_LEVEL_DO);
+        dns_server_packet_bad_opt(env.server, DNS_SERVER_FEATURE_LEVEL_DO);
+        ASSERT_TRUE(env.server->packet_bad_opt);
+        ASSERT_FALSE(dns_server_dnssec_supported(env.server));
+}
+
+/* ================================================================
+ * dns_scope_normalize_query_flags()
+ * ================================================================ */
+
+TEST(dns_scope_normalize_query_flags) {
+        _cleanup_(link_alloc_env_teardown) LinkAllocEnv env = {};
+
+        link_alloc_env_setup(&env, AF_INET, DNS_SERVER_LINK);
+
+        /* Requesting validation only makes a difference in DNSSEC=on-request mode */
+        env.link->dnssec_mode = DNSSEC_ON_REQUEST;
+        env.link->unicast_relevant = true;
+        link_allocate_scopes(env.link);
+        ASSERT_NOT_NULL(env.link->unicast_scope);
+        ASSERT_EQ(dns_scope_normalize_query_flags(env.link->unicast_scope, SD_RESOLVED_VALIDATE|SD_RESOLVED_DNS),
+                  SD_RESOLVED_VALIDATE|SD_RESOLVED_DNS);
+
+        /* Not using link_set_dnssec_mode() here, as it ignores the mode if built without OpenSSL */
+        env.link->dnssec_mode = DNSSEC_ALLOW_DOWNGRADE;
+        env.link->unicast_scope = dns_scope_free(env.link->unicast_scope);
+        link_allocate_scopes(env.link);
+        ASSERT_NOT_NULL(env.link->unicast_scope);
+        ASSERT_EQ(dns_scope_normalize_query_flags(env.link->unicast_scope, SD_RESOLVED_VALIDATE|SD_RESOLVED_DNS),
+                  SD_RESOLVED_DNS);
+}
+
 DEFINE_TEST_MAIN(LOG_DEBUG)

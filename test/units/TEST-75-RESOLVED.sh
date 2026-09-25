@@ -1742,6 +1742,44 @@ testcase_dot_strict_per_link_verify() {
         --grep "Failed to invoke SSL_do_handshake.*(certificate verify failed|self[- ]signed certificate|unable to get local issuer)"
 }
 
+testcase_dnssec_on_request() {
+    # shellcheck disable=SC2317,SC2329
+    cleanup() {
+        resolvectl dnssec dns0 allow-downgrade
+        resolvectl flush-caches
+    }
+    trap cleanup RETURN ERR
+
+    resolvectl dnssec dns0 on-request
+    resolvectl flush-caches
+    assert_eq "$(resolvectl --json=short dnssec dns0 | jq -rc '.[0].dnssec')" 'on-request'
+
+    # Without asking for it, nothing is validated, and the AD bit is not set
+    run resolvectl query mail.signed.test
+    grep -qF "10.0.0.11" "$RUN_OUT"
+    grep -qF "authenticated: no" "$RUN_OUT"
+    run dig +nostats +adflag signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+
+    # 1<<28 = SD_RESOLVED_VALIDATE requests validation, 1<<9 = SD_RESOLVED_AUTHENTICATED.
+    # Signed data is validated, even if unvalidated data is in the cache already…
+    run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"mail.signed.test","flags":268435456}'
+    jq -e '.flags | . % 1024 >= 512' "$RUN_OUT" >/dev/null
+    # … but unsigned data is still returned, just unauthenticated
+    run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"unsigned.test","flags":268435456}'
+    jq -e '.flags | . % 1024 < 512' "$RUN_OUT" >/dev/null
+    # VALIDATE combined with NO_VALIDATE (1<<10) is refused
+    (! varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"signed.test","flags":268436480}')
+
+    # Validated data in the cache must not make non-validating lookups report authenticated data
+    run resolvectl query mail.signed.test
+    grep -qF "authenticated: no" "$RUN_OUT"
+    run dig +nostats +adflag signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+}
+
 testcase_static_record() {
     mkdir -p /run/systemd/resolve/static.d/
     cat >/run/systemd/resolve/static.d/statictest.rr <<EOF
