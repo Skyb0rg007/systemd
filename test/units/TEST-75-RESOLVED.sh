@@ -1754,16 +1754,53 @@ testcase_dnssec_on_request() {
     resolvectl flush-caches
     assert_eq "$(resolvectl --json=short dnssec dns0 | jq -rc '.[0].dnssec')" 'on-request'
 
-    # Without asking for it, nothing is validated, and the AD bit is not set
+    # Without asking for it, nothing is validated, and the AD bit is not set. Note that the AD bit in
+    # queries is not a request for validation, since glibc sets it on all queries with "trust-ad".
     run resolvectl query mail.signed.test
     grep -qF "10.0.0.11" "$RUN_OUT"
     grep -qF "authenticated: no" "$RUN_OUT"
     run dig +nostats +adflag signed.test
     grep -qF "10.0.0.10" "$RUN_OUT"
     (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+    # DO=1 CD=1: the client validates on its own
+    run dig +nostats +do +cd signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+    # DO=0 CD=1: checking disabled
+    run dig +nostats +cd signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+    # The proxy stub never requests validation
+    run dig @127.0.0.54 +nostats +do signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+    # Answers to queries with checking disabled are not cached, as nobody validated them (the CD bit is
+    # passed on upstream for DO=1 CD=1), while answers to other non-validating lookups are
+    resolvectl flush-caches
+    run dig +nostats +do +cd signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    (! resolvectl query --type=A --network=no signed.test)
+    run dig +nostats signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    resolvectl query --type=A --network=no signed.test
 
-    # 1<<28 = SD_RESOLVED_VALIDATE requests validation, 1<<9 = SD_RESOLVED_AUTHENTICATED.
+    # DO=1 CD=0: the client relies on us for validation, hence validate (as e.g. ssh does for SSHFP)
+    run dig +nostats +do signed.test
+    grep -qF "10.0.0.10" "$RUN_OUT"
+    grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null
+    run dig +nostats +do -t TXT this.should.be.authenticated.wild.signed.test
+    grep -qF "this is a wildcard" "$RUN_OUT"
+    grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null
+    # … but unsigned data is still returned, just without the AD bit
+    run dig +nostats +do unsigned.test
+    grep -qF "status: NOERROR" "$RUN_OUT"
+    grep -qF "10.0.0.101" "$RUN_OUT"
+    (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
+    # 1<<28 = SD_RESOLVED_VALIDATE is the Varlink equivalent of DO=1 CD=0, 1<<9 = SD_RESOLVED_AUTHENTICATED.
     # Signed data is validated, even if unvalidated data is in the cache already…
+    resolvectl flush-caches
+    run resolvectl query mail.signed.test
+    grep -qF "authenticated: no" "$RUN_OUT"
     run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"mail.signed.test","flags":268435456}'
     jq -e '.flags | . % 1024 >= 512' "$RUN_OUT" >/dev/null
     # … but unsigned data is still returned, just unauthenticated
@@ -1772,9 +1809,13 @@ testcase_dnssec_on_request() {
     # VALIDATE combined with NO_VALIDATE (1<<10) is refused
     (! varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"signed.test","flags":268436480}')
 
-    # Validated data in the cache must not make non-validating lookups report authenticated data
+    # Validated data in the cache must not make non-validating lookups report authenticated data, neither
+    # via Varlink nor via the stub
     run resolvectl query mail.signed.test
     grep -qF "authenticated: no" "$RUN_OUT"
+    resolvectl flush-caches
+    run dig +nostats +do signed.test
+    grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null
     run dig +nostats +adflag signed.test
     grep -qF "10.0.0.10" "$RUN_OUT"
     (! grep "flags:[^;]* ad" "$RUN_OUT" >/dev/null)
