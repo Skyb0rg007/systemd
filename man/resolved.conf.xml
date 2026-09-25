@@ -177,13 +177,16 @@
 
         <para>If set to <literal>on-request</literal>, DNS lookups are not DNSSEC validated by default,
         and the AD ("Authenticated Data") bit is not set on responses. However, clients may explicitly
-        request DNSSEC validation for individual lookups via the <constant>SD_RESOLVED_VALIDATE</constant>
-        flag of the D-Bus and Varlink APIs. Such lookups are validated as if this option was set to true,
-        while all other lookups behave as if it was set to false, i.e. DNSSEC data is not requested from the
-        DNS server for them. This mode is useful on systems that frequently connect to networks that break
-        DNSSEC, while still allowing applications that need authenticated data (for example for SSHFP or
-        OPENPGPKEY records) to acquire it. Note that the DNS server needs to support DNSSEC for validation
-        to succeed.</para>
+        request DNSSEC validation for individual lookups: via the <constant>SD_RESOLVED_VALIDATE</constant>
+        flag of the D-Bus and Varlink APIs, or by sending a query to the DNS stub listener with the DO
+        ("DNSSEC OK") bit set and the CD ("Checking Disabled") bit unset, as DNSSEC-aware applications
+        relying on the resolver for validation do (see
+        <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>).
+        Such lookups are validated as if this option was set to true, while all other lookups behave as
+        if it was set to false, i.e. DNSSEC data is not requested from the DNS server for them. This mode is
+        useful on systems that frequently connect to networks that break DNSSEC, while still allowing
+        applications that need authenticated data (for example for SSHFP or OPENPGPKEY records) to acquire
+        it. Note that the DNS server needs to support DNSSEC for validation to succeed.</para>
 
         <para>If set to false, DNS lookups are not DNSSEC validated.</para>
 

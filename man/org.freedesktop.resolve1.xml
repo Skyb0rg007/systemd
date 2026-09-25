@@ -409,7 +409,9 @@ node /org/freedesktop/resolve1 {
       <literal>allow-downgrade</literal>, DNSSEC validation is enabled, but is turned off automatically if the
       selected server does not support it (thus opening up behaviour to downgrade attacks). If
       <literal>on-request</literal>, DNSSEC validation is only done for look-ups that request it via the
-      <constant>SD_RESOLVED_VALIDATE</constant> flag. Note that DNSSEC only applies to traditional DNS, not to LLMNR or MulticastDNS.</para>
+      <constant>SD_RESOLVED_VALIDATE</constant> flag, or via the DNS stub (see
+      <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>).
+      Note that DNSSEC only applies to traditional DNS, not to LLMNR or MulticastDNS.</para>
 
       <para>The <function>SetLinkDNSSECNegativeTrustAnchors()</function> method may be used to configure DNSSEC
       Negative Trust Anchors (NTAs) for a specific network interface. It takes a network interface index and a
@@ -557,7 +559,10 @@ node /org/freedesktop/resolve1 {
         <literal>on-request</literal>, this enables strict DNSSEC validation for the look-up, which is otherwise
         not done in this mode. In the other DNSSEC modes this flag has no effect, as validation is either
         done anyway or turned off. Data that is proven to be unsigned is returned without the AUTHENTICATED
-        flag, data that fails validation results in an error. Clients that require authenticated data should check the AUTHENTICATED flag of the response (see
+        flag, data that fails validation results in an error. This is equivalent to a DNS query sent to the
+        local DNS stub with the DO bit set and the CD bit unset, see
+        <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
+        Clients that require authenticated data should check the AUTHENTICATED flag of the response (see
         below). VALIDATE may not be combined with NO_VALIDATE.</para>
 
         <para>The next six flags allow disabling certain sources during resolution. NO_SYNTHESIZE disables

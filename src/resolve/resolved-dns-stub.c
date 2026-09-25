@@ -926,6 +926,7 @@ static int dns_stub_stream_complete(DnsStream *s, int error) {
 
 static void dns_stub_process_query(Manager *m, DnsStubListenerExtra *l, DnsStream *s, DnsPacket *p) {
         uint64_t protocol_flags = SD_RESOLVED_PROTOCOLS_ALL;
+        uint64_t validation_flags = 0;
         _cleanup_(dns_query_freep) DnsQuery *q = NULL;
         Hashmap **queries_by_packet;
         DnsQuery *existing;
@@ -1009,12 +1010,28 @@ static void dns_stub_process_query(Manager *m, DnsStubListenerExtra *l, DnsStrea
                 bypass = true;
         }
 
+        /* Map the client's DNSSEC signalling onto our query flags (RFC 4035, Section 3.2.2 and 4.9):
+         *
+         *   DO=0 CD=0 → DNSSEC-unaware client: validate according to the configured DNSSEC mode
+         *   DO=1 CD=0 → non-validating DNSSEC-aware client relying on us to validate: request validation,
+         *               i.e. validate even if DNSSEC=on-request (SD_RESOLVED_VALIDATE)
+         *   DO=1 CD=1 → validating client: don't validate, return raw data (SD_RESOLVED_NO_VALIDATE)
+         *   DO=0 CD=1 → client disabled checking: don't validate (SD_RESOLVED_NO_VALIDATE)
+         *
+         * Note that the AD bit in queries is not considered a request for validation, since glibc sets it
+         * on all queries if "trust-ad" is set in resolv.conf, which is what we recommend. The proxy stub
+         * passes messages through with minimal processing, hence it doesn't request validation. */
+        if (DNS_PACKET_CD(p))
+                validation_flags = SD_RESOLVED_NO_VALIDATE | SD_RESOLVED_NO_CACHE;
+        else if (dns_packet_do(p) && !address_is_proxy(p->family, &p->destination))
+                validation_flags = SD_RESOLVED_VALIDATE;
+
         if (bypass)
                 r = dns_query_new(m, &q, NULL, NULL, p, 0,
                                   protocol_flags|
                                   SD_RESOLVED_NO_CNAME|
                                   SD_RESOLVED_NO_SEARCH|
-                                  (DNS_PACKET_CD(p) ? SD_RESOLVED_NO_VALIDATE | SD_RESOLVED_NO_CACHE : 0)|
+                                  validation_flags|
                                   SD_RESOLVED_REQUIRE_PRIMARY|
                                   SD_RESOLVED_CLAMP_TTL|
                                   SD_RESOLVED_RELAX_SINGLE_LABEL);
@@ -1022,7 +1039,7 @@ static void dns_stub_process_query(Manager *m, DnsStubListenerExtra *l, DnsStrea
                 r = dns_query_new(m, &q, p->question, p->question, NULL, 0,
                                   protocol_flags|
                                   SD_RESOLVED_NO_SEARCH|
-                                  (DNS_PACKET_CD(p) ? SD_RESOLVED_NO_VALIDATE | SD_RESOLVED_NO_CACHE : 0)|
+                                  validation_flags|
                                   (dns_packet_do(p) ? SD_RESOLVED_REQUIRE_PRIMARY : 0)|
                                   SD_RESOLVED_CLAMP_TTL);
         if (r == -ENOANO) /* Refuse query if there is -ENOANO */
