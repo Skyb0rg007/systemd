@@ -388,13 +388,15 @@
       <varlistentry>
         <term><option>--validate=<replaceable>BOOL</replaceable></option></term>
 
-        <listitem><para>Takes a boolean parameter; used in conjunction with <command>query</command>. If true
-        (the default), DNSSEC validation is applied as usual — under the condition that it is enabled for the
-        network and for <filename>systemd-resolved.service</filename> as a whole. If false, DNSSEC validation
-        is disabled for the specific query, regardless of whether it is enabled for the network or in the
-        service. Note that setting this option to true does not force DNSSEC validation on systems/networks
-        where DNSSEC is turned off. This option is only suitable to turn off such validation where otherwise
-        enabled, not enable validation where otherwise disabled.</para>
+        <listitem><para>Takes a boolean parameter; used in conjunction with <command>query</command>. If not
+        specified, DNSSEC validation is applied as usual — under the condition that it is enabled for the
+        network and for <filename>systemd-resolved.service</filename> as a whole. If true, DNSSEC validation
+        is requested for the specific query, which makes a difference only on networks where
+        <varname>DNSSEC=</varname> is set to <literal>on-request</literal>, see
+        <citerefentry><refentrytitle>resolved.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+        If false, DNSSEC validation is disabled for the specific query, regardless of whether it is enabled
+        for the network or in the service. Note that setting this option to true does not force DNSSEC
+        validation on systems/networks where DNSSEC is turned off.</para>
 
         <xi:include href="version-info.xml" xpointer="v248"/></listitem>
       </varlistentry>

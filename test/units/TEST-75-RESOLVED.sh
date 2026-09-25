@@ -1806,6 +1806,14 @@ testcase_dnssec_on_request() {
     # … but unsigned data is still returned, just unauthenticated
     run varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"unsigned.test","flags":268435456}'
     jq -e '.flags | . % 1024 < 512' "$RUN_OUT" >/dev/null
+    # resolvectl --validate=yes requests validation too
+    resolvectl flush-caches
+    run resolvectl query --validate=yes mail.signed.test
+    grep -qF "10.0.0.11" "$RUN_OUT"
+    grep -qF "authenticated: yes" "$RUN_OUT"
+    run resolvectl query --validate=yes unsigned.test
+    grep -qF "10.0.0.101" "$RUN_OUT"
+    grep -qF "authenticated: no" "$RUN_OUT"
     # VALIDATE combined with NO_VALIDATE (1<<10) is refused
     (! varlinkctl call /run/systemd/resolve/io.systemd.Resolve io.systemd.Resolve.ResolveHostname '{"name":"signed.test","flags":268436480}')
 

@@ -411,6 +411,44 @@ static int varlink_connect_with_query_timeout(sd_varlink **vl) {
         return 0;
 }
 
+static int varlink_call_resolve(
+                sd_varlink *vl,
+                const char *method,
+                sd_json_variant *parameters,
+                uint64_t flags,
+                sd_json_variant **ret_reply,
+                const char **ret_error_id) {
+
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *p = NULL;
+        int r;
+
+        assert(vl);
+        assert(method);
+        assert(ret_reply);
+        assert(ret_error_id);
+
+        p = sd_json_variant_ref(parameters);
+        if (flags != 0) {
+                r = sd_json_variant_set_field_unsigned(&p, "flags", flags);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to add flags to parameters: %m");
+        }
+
+        r = sd_varlink_call(vl, method, p, ret_reply, ret_error_id);
+        if (r < 0)
+                return log_error_errno(r, "Failed to issue varlink call: %m");
+
+        /* Older versions of systemd-resolved refuse SD_RESOLVED_VALIDATE. It only makes a difference in
+         * DNSSEC=on-request mode, which they don't know either, hence simply try again without it. */
+        if (FLAGS_SET(flags, SD_RESOLVED_VALIDATE) &&
+            sd_varlink_error_is_invalid_parameter(*ret_error_id, *ret_reply, "flags")) {
+                log_debug("Service refused flags, retrying without requesting DNSSEC validation.");
+                return varlink_call_resolve(vl, method, parameters, flags & ~SD_RESOLVED_VALIDATE, ret_reply, ret_error_id);
+        }
+
+        return 0;
+}
+
 static int resolve_host(const char *name) {
         int r;
 
@@ -426,21 +464,22 @@ static int resolve_host(const char *name) {
         if (r < 0)
                 return r;
 
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *parameters = NULL;
+        r = sd_json_buildo(
+                        &parameters,
+                        SD_JSON_BUILD_PAIR_STRING("name", name),
+                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_ifindex > 0, "ifindex", arg_ifindex),
+                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_family != AF_UNSPEC, "family", arg_family));
+        if (r < 0)
+                return log_error_errno(r, "Failed to build parameters: %m");
+
         usec_t ts = now(CLOCK_MONOTONIC);
 
         const char *error_id = NULL;
         sd_json_variant *v = NULL;
-        r = sd_varlink_callbo(
-                        vl,
-                        "io.systemd.Resolve.ResolveHostname",
-                        &v,
-                        &error_id,
-                        SD_JSON_BUILD_PAIR_STRING("name", name),
-                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_ifindex > 0, "ifindex", arg_ifindex),
-                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_family != AF_UNSPEC, "family", arg_family),
-                        JSON_BUILD_PAIR_UNSIGNED_NON_ZERO("flags", arg_flags));
+        r = varlink_call_resolve(vl, "io.systemd.Resolve.ResolveHostname", parameters, arg_flags, &v, &error_id);
         if (r < 0)
-                return log_error_errno(r, "Failed to issue varlink call: %m");
+                return r;
 
         ts = now(CLOCK_MONOTONIC) - ts;
 
@@ -512,21 +551,22 @@ static int resolve_address(int family, const union in_addr_union *address, int i
         if (r < 0)
                 return r;
 
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *parameters = NULL;
+        r = sd_json_buildo(
+                        &parameters,
+                        SD_JSON_BUILD_PAIR_BYTE_ARRAY("address", &address->bytes, FAMILY_ADDRESS_SIZE_SAFE(family)),
+                        SD_JSON_BUILD_PAIR_UNSIGNED("family", family),
+                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(ifindex > 0, "ifindex", ifindex));
+        if (r < 0)
+                return log_error_errno(r, "Failed to build parameters: %m");
+
         usec_t ts = now(CLOCK_MONOTONIC);
 
         const char *error_id = NULL;
         sd_json_variant *v = NULL;
-        r = sd_varlink_callbo(
-                        vl,
-                        "io.systemd.Resolve.ResolveAddress",
-                        &v,
-                        &error_id,
-                        SD_JSON_BUILD_PAIR_BYTE_ARRAY("address", &address->bytes, FAMILY_ADDRESS_SIZE_SAFE(family)),
-                        SD_JSON_BUILD_PAIR_UNSIGNED("family", family),
-                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(ifindex > 0, "ifindex", ifindex),
-                        JSON_BUILD_PAIR_UNSIGNED_NON_ZERO("flags", arg_flags));
+        r = varlink_call_resolve(vl, "io.systemd.Resolve.ResolveAddress", parameters, arg_flags, &v, &error_id);
         if (r < 0)
-                return log_error_errno(r, "Failed to issue varlink call: %m");
+                return r;
 
         ts = now(CLOCK_MONOTONIC) - ts;
 
@@ -675,22 +715,23 @@ static int resolve_record(const char *name, uint16_t class, uint16_t type, bool 
         if (r < 0)
                 return r;
 
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *parameters = NULL;
+        r = sd_json_buildo(
+                        &parameters,
+                        SD_JSON_BUILD_PAIR_STRING("name", name),
+                        SD_JSON_BUILD_PAIR_UNSIGNED("type", type),
+                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_ifindex > 0, "ifindex", arg_ifindex),
+                        JSON_BUILD_PAIR_UNSIGNED_NON_ZERO("class", class));
+        if (r < 0)
+                return log_error_errno(r, "Failed to build parameters: %m");
+
         usec_t ts = now(CLOCK_MONOTONIC);
 
         const char *error_id = NULL;
         sd_json_variant *v = NULL;
-        r = sd_varlink_callbo(
-                        vl,
-                        "io.systemd.Resolve.ResolveRecord",
-                        &v,
-                        &error_id,
-                        SD_JSON_BUILD_PAIR_STRING("name", name),
-                        SD_JSON_BUILD_PAIR_UNSIGNED("type", type),
-                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_ifindex > 0, "ifindex", arg_ifindex),
-                        JSON_BUILD_PAIR_UNSIGNED_NON_ZERO("class", class),
-                        JSON_BUILD_PAIR_UNSIGNED_NON_ZERO("flags", arg_flags));
+        r = varlink_call_resolve(vl, "io.systemd.Resolve.ResolveRecord", parameters, arg_flags, &v, &error_id);
         if (r < 0)
-                return log_error_errno(r, "Failed to issue varlink call: %m");
+                return r;
 
         ts = now(CLOCK_MONOTONIC) - ts;
 
@@ -933,23 +974,24 @@ static int resolve_service(const char *name, const char *type, const char *domai
         if (r < 0)
                 return r;
 
-        usec_t ts = now(CLOCK_MONOTONIC);
-
-        const char *error_id = NULL;
-        sd_json_variant *v = NULL;
-        r = sd_varlink_callbo(
-                        vl,
-                        "io.systemd.Resolve.ResolveService",
-                        &v,
-                        &error_id,
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *parameters = NULL;
+        r = sd_json_buildo(
+                        &parameters,
                         SD_JSON_BUILD_PAIR_STRING("domain", domain),
                         JSON_BUILD_PAIR_STRING_NON_EMPTY("name", name),
                         JSON_BUILD_PAIR_STRING_NON_EMPTY("type", type),
                         JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_ifindex > 0, "ifindex", arg_ifindex),
-                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_family != AF_UNSPEC, "family", arg_family),
-                        JSON_BUILD_PAIR_UNSIGNED_NON_ZERO("flags", flags));
+                        JSON_BUILD_PAIR_CONDITION_UNSIGNED(arg_family != AF_UNSPEC, "family", arg_family));
         if (r < 0)
-                return log_error_errno(r, "Failed to issue varlink call: %m");
+                return log_error_errno(r, "Failed to build parameters: %m");
+
+        usec_t ts = now(CLOCK_MONOTONIC);
+
+        const char *error_id = NULL;
+        sd_json_variant *v = NULL;
+        r = varlink_call_resolve(vl, "io.systemd.Resolve.ResolveService", parameters, flags, &v, &error_id);
+        if (r < 0)
+                return r;
 
         ts = now(CLOCK_MONOTONIC) - ts;
 
@@ -3592,10 +3634,11 @@ static int native_parse_argv(int argc, char *argv[], char ***remaining_args) {
                         SET_FLAG(arg_flags, SD_RESOLVED_NO_CNAME, r == 0);
                         break;
 
-                OPTION_LONG("validate", "BOOL", "Allow DNSSEC validation (default: yes)"):
+                OPTION_LONG("validate", "BOOL", "Request or disable DNSSEC validation"):
                         r = parse_boolean_argument("--validate=", opts.arg, NULL);
                         if (r < 0)
                                 return r;
+                        SET_FLAG(arg_flags, SD_RESOLVED_VALIDATE, r > 0);
                         SET_FLAG(arg_flags, SD_RESOLVED_NO_VALIDATE, r == 0);
                         break;
 

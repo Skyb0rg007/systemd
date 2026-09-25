@@ -84,7 +84,7 @@ _arguments \
     '--service-address=[Do not resolve address for services]:BOOL:(yes no)' \
     '--service-txt=[Do not resolve TXT records for services]:BOOL:(yes no)' \
     '--cname=[Do not follow CNAME redirects]:BOOL:(yes no)' \
-    '--validate=[Do not allow DNSSEC validation]:BOOL:(yes no)' \
+    '--validate=[Request or disable DNSSEC validation]:BOOL:(yes no)' \
     '--synthesize=[Do not allow synthetic response]:BOOL:(yes no)' \
     '--cache=[Do not allow response from cache]:BOOL:(yes no)' \
     '--stale-data=[Do not allow response from cache with stale data]:BOOL:(yes no)' \
