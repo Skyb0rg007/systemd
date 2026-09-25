@@ -372,7 +372,7 @@ option('service-watchdog', type : 'string', value : '3min',
 
 option('default-dnssec', type : 'combo',
        description : 'default DNSSEC mode',
-       choices : ['yes', 'allow-downgrade', 'no'],
+       choices : ['yes', 'allow-downgrade', 'on-request', 'no'],
        value : 'allow-downgrade')
 option('default-dns-over-tls', type : 'combo',
        description : 'default DNS-over-TLS mode',

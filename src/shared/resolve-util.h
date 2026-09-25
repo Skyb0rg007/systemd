@@ -44,6 +44,10 @@ typedef enum DnssecMode {
         /* Insist on DNSSEC server support, and rather fail than downgrading. */
         DNSSEC_YES,
 
+        /* Don't validate by default (like DNSSEC_NO), but validate lookups whose client explicitly
+         * asks for it via SD_RESOLVED_VALIDATE (and then behave like DNSSEC_YES). */
+        DNSSEC_ON_REQUEST,
+
         _DNSSEC_MODE_MAX,
         _DNSSEC_MODE_INVALID = -EINVAL,
 } DnssecMode;

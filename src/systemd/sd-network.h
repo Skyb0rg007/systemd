@@ -165,7 +165,7 @@ int sd_network_link_get_mdns(int ifindex, char **ret);
 int sd_network_link_get_dns_over_tls(int ifindex, char **ret);
 
 /* Indicates whether or not DNSSEC should be enabled for the link
- * Possible levels of support: yes, no, allow-downgrade
+ * Possible levels of support: yes, no, allow-downgrade, on-request
  * Possible return codes:
  *   -ENODATA: networkd is not aware of the link
  */

@@ -62,7 +62,7 @@ _systemd-resolve() {
                 comps="yes no resolve"
                 ;;
             --set-dnssec)
-                comps="yes no allow-downgrade"
+                comps="yes no allow-downgrade on-request"
                 ;;
             --set-dnsovertls)
                 comps="yes no opportunistic"

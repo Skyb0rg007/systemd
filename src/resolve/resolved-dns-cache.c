@@ -1106,6 +1106,16 @@ int dns_cache_lookup(
                         goto miss;
                 }
 
+                /* If the caller asks for validation, don't use entries that never went through DNSSEC
+                 * validation (e.g. because they were acquired by a non-validating transaction in
+                 * DNSSEC=on-request mode), but ask the network again so that we can validate. */
+                if (FLAGS_SET(query_flags, SD_RESOLVED_VALIDATE) && j->dnssec_result < 0) {
+                        log_debug("Validation was requested for cache lookup for %s, but cached data was not validated.",
+                                  dns_resource_key_to_string(key, key_str, sizeof key_str));
+
+                        goto miss;
+                }
+
                 /* Skip the next part if ttl is expired and requested with no stale flag. */
                 if (FLAGS_SET(query_flags, SD_RESOLVED_NO_STALE) && j->until_valid < current) {
                         log_debug("Requested with no stale and TTL expired for %s",

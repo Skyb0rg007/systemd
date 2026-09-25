@@ -1554,7 +1554,7 @@ conf.set10('ENABLE_REPART', have)
 
 default_dnssec = get_option('default-dnssec')
 if default_dnssec != 'no' and conf.get('HAVE_OPENSSL') == 0
-        message('default-dnssec cannot be set to yes or allow-downgrade when openssl is disabled. Setting default-dnssec to no.')
+        message('default-dnssec cannot be set to yes, allow-downgrade or on-request when openssl is disabled. Setting default-dnssec to no.')
         default_dnssec = 'no'
 endif
 conf.set('DEFAULT_DNSSEC_MODE',

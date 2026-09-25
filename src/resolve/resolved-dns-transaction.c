@@ -34,6 +34,75 @@
 
 #define TRANSACTIONS_MAX 4096
 
+static bool dns_transaction_validation_requested(DnsTransaction *t) {
+        assert(t);
+
+        /* Returns true if this transaction is in DNSSEC=on-request mode, and its client asked for validation.
+         * Note that SD_RESOLVED_VALIDATE is dropped from transactions in all other modes, see
+         * dns_scope_normalize_query_flags(). */
+
+        return FLAGS_SET(t->query_flags, SD_RESOLVED_VALIDATE);
+}
+
+static DnssecMode dns_transaction_dnssec_mode(DnsTransaction *t) {
+        assert(t);
+
+        /* Returns the DNSSEC mode in effect for this transaction. In "on-request" mode we validate only if
+         * the client explicitly asked for validation, and then do so strictly, i.e. without allowing
+         * downgrades. Otherwise we don't validate at all. Note that the flags are inherited by auxiliary
+         * DNSSEC transactions, hence those are validated too. */
+
+        if (t->scope->dnssec_mode == DNSSEC_ON_REQUEST)
+                return dns_transaction_validation_requested(t) ? DNSSEC_YES : DNSSEC_NO;
+
+        return t->scope->dnssec_mode;
+}
+
+static bool dns_transaction_dnssec_supported(DnsTransaction *t) {
+        assert(t);
+
+        /* Checks whether our transaction's DNS server is assumed to be compatible with DNSSEC. Returns false as soon
+         * as we changed our mind about a server, and now believe it is incompatible with DNSSEC. */
+
+        if (t->scope->protocol != DNS_PROTOCOL_DNS)
+                return false;
+
+        /* If we have picked no server, then we are working from the cache or some other source, and DNSSEC might well
+         * be supported, hence return true. */
+        if (!t->server)
+                return true;
+
+        /* Lookups that requested validation in DNSSEC=on-request mode are strict, hence assume DNSSEC is
+         * supported, as dns_server_dnssec_supported() does in DNSSEC=yes mode. */
+        if (dns_transaction_dnssec_mode(t) == DNSSEC_YES)
+                return true;
+
+        /* Note that we do not check the feature level actually used for the transaction but instead the feature level
+         * the server is known to support currently, as the transaction feature level might be lower than what the
+         * server actually supports, since we might have downgraded this transaction's feature level because we got a
+         * SERVFAIL earlier and wanted to check whether downgrading fixes it. */
+
+        return dns_server_dnssec_supported(t->server);
+}
+
+static DnsServerFeatureLevel dns_transaction_possible_feature_level(DnsTransaction *t, DnsServer *server) {
+        DnsServerFeatureLevel level;
+
+        assert(t);
+        assert(server);
+
+        level = dns_server_possible_feature_level(server);
+
+        /* Lookups that requested validation in DNSSEC=on-request mode are strict, i.e. behave as in
+         * DNSSEC=yes mode, where the server is not downgraded to feature levels below DO. The server's
+         * feature level is shared with non-validating lookups however, hence it might have been downgraded
+         * anyway. Always ask for DNSSEC data in that case, as we cannot validate without it. */
+        if (dns_transaction_validation_requested(t) && !DNS_SERVER_FEATURE_LEVEL_IS_DNSSEC(level))
+                level = DNS_SERVER_FEATURE_LEVEL_IS_TLS(level) ? DNS_SERVER_FEATURE_LEVEL_TLS_DO : DNS_SERVER_FEATURE_LEVEL_DO;
+
+        return level;
+}
+
 static void dns_transaction_reset_answer(DnsTransaction *t) {
         assert(t);
 
@@ -304,7 +373,7 @@ int dns_transaction_new(
                 .answer_ede_rcode = _DNS_EDE_RCODE_INVALID,
                 .answer_nsec_ttl = UINT32_MAX,
                 .key = dns_resource_key_ref(key),
-                .query_flags = query_flags,
+                .query_flags = dns_scope_normalize_query_flags(s, query_flags),
                 .bypass = dns_packet_ref(bypass),
                 .current_feature_level = _DNS_SERVER_FEATURE_LEVEL_INVALID,
                 .clamp_feature_level_servfail = _DNS_SERVER_FEATURE_LEVEL_INVALID,
@@ -496,7 +565,7 @@ static int dns_transaction_pick_server(DnsTransaction *t) {
         if (server != t->server)
                 t->clamp_feature_level_servfail = _DNS_SERVER_FEATURE_LEVEL_INVALID;
 
-        t->current_feature_level = dns_server_possible_feature_level(server);
+        t->current_feature_level = dns_transaction_possible_feature_level(t, server);
 
         /* Clamp the feature level if that is requested. */
         if (t->clamp_feature_level_servfail != _DNS_SERVER_FEATURE_LEVEL_INVALID &&
@@ -562,7 +631,7 @@ static int dns_transaction_maybe_restart(DnsTransaction *t) {
         if (!t->server)
                 return 0;
 
-        if (t->current_feature_level <= dns_server_possible_feature_level(t->server))
+        if (t->current_feature_level <= dns_transaction_possible_feature_level(t, t->server))
                 return 0;
 
         /* The server's current feature level is lower than when we sent the original query. We learnt something from
@@ -717,7 +786,7 @@ static int dns_transaction_emit_tcp(DnsTransaction *t) {
                         return -ELOOP;
 
                 if (!t->bypass) {
-                        if (!dns_server_dnssec_supported(t->server) && dns_type_is_dnssec(dns_transaction_key(t)->type))
+                        if (!dns_transaction_dnssec_supported(t) && dns_type_is_dnssec(dns_transaction_key(t)->type))
                                 return -EOPNOTSUPP;
 
                         r = dns_server_adjust_opt(t->server, t->sent, t->current_feature_level);
@@ -845,7 +914,10 @@ static void dns_transaction_cache_answer(DnsTransaction *t) {
         if (t->scope->manager->enable_cache == DNS_CACHE_MODE_NO)
                 return;
 
-        /* If validation is turned off for this transaction, but DNSSEC is on, then let's not cache this */
+        /* If validation is turned off for this transaction, but DNSSEC is on, then let's not cache this. Note
+         * that this checks the scope's DNSSEC mode, not the transaction's: in DNSSEC=on-request mode the
+         * other lookups rely on the upstream server for validation, but it might have been asked to skip
+         * it (bypass lookups pass on the CD bit), hence don't serve them such data either. */
         if (FLAGS_SET(t->query_flags, SD_RESOLVED_NO_VALIDATE) && t->scope->dnssec_mode != DNSSEC_NO)
                 return;
 
@@ -1000,7 +1072,7 @@ static void dns_transaction_process_dnssec(DnsTransaction *t) {
                 goto fail;
 
         if (t->answer_dnssec_result == DNSSEC_INCOMPATIBLE_SERVER &&
-            t->scope->dnssec_mode == DNSSEC_YES) {
+            dns_transaction_dnssec_mode(t) == DNSSEC_YES) {
 
                 /* We are not in automatic downgrade mode, and the server is bad. Let's try a different server, maybe
                  * that works. */
@@ -1538,7 +1610,13 @@ static int dns_transaction_emit_udp(DnsTransaction *t) {
                 if (t->current_feature_level < DNS_SERVER_FEATURE_LEVEL_UDP || DNS_SERVER_FEATURE_LEVEL_IS_TLS(t->current_feature_level))
                         return -EAGAIN; /* Sorry, can't do UDP, try TCP! */
 
-                if (!t->bypass && !dns_server_dnssec_supported(t->server) && dns_type_is_dnssec(dns_transaction_key(t)->type))
+                /* Lookups requesting validation in DNSSEC=on-request mode use a DNSSEC feature level even if
+                 * the server was downgraded further (see dns_transaction_possible_feature_level()). If the
+                 * server was downgraded to TCP since UDP doesn't work, still use TCP then. */
+                if (t->server->possible_feature_level < DNS_SERVER_FEATURE_LEVEL_UDP)
+                        return -EAGAIN;
+
+                if (!t->bypass && !dns_transaction_dnssec_supported(t) && dns_type_is_dnssec(dns_transaction_key(t)->type))
                         return -EOPNOTSUPP;
 
                 if (r > 0 || t->dns_udp_fd < 0) { /* Server changed, or no connection yet. */
@@ -1764,7 +1842,7 @@ static int dns_transaction_prepare(DnsTransaction *t, usec_t ts) {
                          * and if our trust anchor didn't know it either, this means we cannot do any DNSSEC
                          * logic anymore. */
 
-                        if (t->scope->dnssec_mode == DNSSEC_ALLOW_DOWNGRADE) {
+                        if (dns_transaction_dnssec_mode(t) == DNSSEC_ALLOW_DOWNGRADE) {
                                 /* We are in downgrade mode. In this case, synthesize an unsigned empty
                                  * response, so that the any lookup depending on this one can continue
                                  * assuming there was no DS, and hence the root zone was unsigned. */
@@ -1837,6 +1915,16 @@ static int dns_transaction_prepare(DnsTransaction *t, usec_t ts) {
                         return r;
                 if (r > 0) {
                         dns_transaction_randomize_answer(t);
+
+                        /* In DNSSEC=on-request mode the cache might contain data validated on behalf of
+                         * some other client. Don't pass on the authentication state to clients which didn't
+                         * ask for it, so that non-validating lookups behave the same regardless of what
+                         * happened before. */
+                        if (t->scope->dnssec_mode == DNSSEC_ON_REQUEST &&
+                            !dns_transaction_validation_requested(t)) {
+                                SET_FLAG(t->answer_query_flags, SD_RESOLVED_AUTHENTICATED, false);
+                                t->answer_dnssec_result = _DNSSEC_RESULT_INVALID;
+                        }
 
                         if (t->bypass && t->scope->protocol == DNS_PROTOCOL_DNS && !t->received)
                                 /* When bypass mode is on, do not use cached data unless it came with a full
@@ -2096,7 +2184,7 @@ static int dns_transaction_make_packet(DnsTransaction *t) {
                                 &p, t->scope->protocol,
                                 /* min_alloc_dsize= */ 0,
                                 /* dnssec_checking_disabled= */ !FLAGS_SET(t->query_flags, SD_RESOLVED_NO_VALIDATE) &&
-                                                  t->scope->dnssec_mode != DNSSEC_NO);
+                                                  dns_transaction_dnssec_mode(t) != DNSSEC_NO);
                 if (r < 0)
                         return r;
 
@@ -2434,28 +2522,6 @@ static int dns_transaction_is_primary_response(DnsTransaction *t, DnsResourceRec
         return dns_resource_key_match_cname_or_dname(dns_transaction_key(t), rr->key, NULL);
 }
 
-static bool dns_transaction_dnssec_supported(DnsTransaction *t) {
-        assert(t);
-
-        /* Checks whether our transaction's DNS server is assumed to be compatible with DNSSEC. Returns false as soon
-         * as we changed our mind about a server, and now believe it is incompatible with DNSSEC. */
-
-        if (t->scope->protocol != DNS_PROTOCOL_DNS)
-                return false;
-
-        /* If we have picked no server, then we are working from the cache or some other source, and DNSSEC might well
-         * be supported, hence return true. */
-        if (!t->server)
-                return true;
-
-        /* Note that we do not check the feature level actually used for the transaction but instead the feature level
-         * the server is known to support currently, as the transaction feature level might be lower than what the
-         * server actually supports, since we might have downgraded this transaction's feature level because we got a
-         * SERVFAIL earlier and wanted to check whether downgrading fixes it. */
-
-        return dns_server_dnssec_supported(t->server);
-}
-
 static bool dns_transaction_dnssec_supported_full(DnsTransaction *t) {
         DnsTransaction *dt;
 
@@ -2497,7 +2563,7 @@ int dns_transaction_request_dnssec_keys(DnsTransaction *t) {
          * - For other queries with no matching response RRs, and no NSEC/NSEC3, the DS RR
          */
 
-        if (FLAGS_SET(t->query_flags, SD_RESOLVED_NO_VALIDATE) || t->scope->dnssec_mode == DNSSEC_NO)
+        if (FLAGS_SET(t->query_flags, SD_RESOLVED_NO_VALIDATE) || dns_transaction_dnssec_mode(t) == DNSSEC_NO)
                 return 0;
         if (t->answer_source != DNS_TRANSACTION_NETWORK)
                 return 0; /* We only need to validate stuff from the network */
@@ -2720,7 +2786,7 @@ int dns_transaction_request_dnssec_keys(DnsTransaction *t) {
                         if (r < 0)
                                 return r;
 
-                        if (t->scope->dnssec_mode == DNSSEC_ALLOW_DOWNGRADE && dns_name_is_root(name)) {
+                        if (dns_transaction_dnssec_mode(t) == DNSSEC_ALLOW_DOWNGRADE && dns_name_is_root(name)) {
                                 _cleanup_(dns_resource_key_unrefp) DnsResourceKey *soa = NULL;
                                 /* We made it all the way to the root zone. If we are in allow-downgrade
                                  * mode, we need to make at least one request that we can be certain should
@@ -2888,7 +2954,7 @@ static int dns_transaction_requires_rrsig(DnsTransaction *t, DnsResourceRecord *
         /* Checks if the RR we are looking for must be signed with an
          * RRSIG. This is used for positive responses. */
 
-        if (t->scope->dnssec_mode == DNSSEC_NO)
+        if (dns_transaction_dnssec_mode(t) == DNSSEC_NO)
                 return false;
 
         if (dns_type_is_pseudo(rr->key->type))
@@ -3045,7 +3111,7 @@ static int dns_transaction_in_private_tld(DnsTransaction *t, const DnsResourceKe
 
         assert(t);
 
-        if (t->scope->dnssec_mode != DNSSEC_ALLOW_DOWNGRADE)
+        if (dns_transaction_dnssec_mode(t) != DNSSEC_ALLOW_DOWNGRADE)
                 return false; /* In strict DNSSEC mode what doesn't exist, doesn't exist */
 
         tld = dns_resource_key_name(key);
@@ -3090,7 +3156,7 @@ static int dns_transaction_requires_nsec(DnsTransaction *t) {
         /* Checks if we need to insist on NSEC/NSEC3 RRs for proving
          * this negative reply */
 
-        if (t->scope->dnssec_mode == DNSSEC_NO)
+        if (dns_transaction_dnssec_mode(t) == DNSSEC_NO)
                 return false;
 
         if (dns_type_is_pseudo(dns_transaction_key(t)->type))
@@ -3475,7 +3541,7 @@ static int dnssec_validate_records(
 
                                 dns_server_packet_rrsig_missing(t->server, t->current_feature_level);
 
-                                if (t->scope->dnssec_mode == DNSSEC_ALLOW_DOWNGRADE) {
+                                if (dns_transaction_dnssec_mode(t) == DNSSEC_ALLOW_DOWNGRADE) {
 
                                         /* Downgrading is OK? If so, just consider the information unsigned */
 
@@ -3620,7 +3686,7 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
         /* We have now collected all DS and DNSKEY RRs in t->validated_keys, let's see which RRs we can now
          * authenticate with that. */
 
-        if (FLAGS_SET(t->query_flags, SD_RESOLVED_NO_VALIDATE) || t->scope->dnssec_mode == DNSSEC_NO)
+        if (FLAGS_SET(t->query_flags, SD_RESOLVED_NO_VALIDATE) || dns_transaction_dnssec_mode(t) == DNSSEC_NO)
                 return 0;
 
         /* Already validated */

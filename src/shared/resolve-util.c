@@ -20,6 +20,7 @@ static const char* const dnssec_mode_table[_DNSSEC_MODE_MAX] = {
         [DNSSEC_NO] = "no",
         [DNSSEC_ALLOW_DOWNGRADE] = "allow-downgrade",
         [DNSSEC_YES] = "yes",
+        [DNSSEC_ON_REQUEST] = "on-request",
 };
 DEFINE_STRING_TABLE_LOOKUP_WITH_BOOLEAN(dnssec_mode, DnssecMode, DNSSEC_YES);
 

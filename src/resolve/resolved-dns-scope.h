@@ -97,6 +97,7 @@ int dns_scope_mdns_membership(DnsScope *s, bool b);
 int dns_scope_make_reply_packet(DnsScope *s, uint16_t id, int rcode, DnsQuestion *q, DnsAnswer *answer, DnsAnswer *soa, bool tentative, DnsPacket **ret);
 void dns_scope_process_query(DnsScope *s, DnsStream *stream, DnsPacket *p);
 
+uint64_t dns_scope_normalize_query_flags(DnsScope *s, uint64_t query_flags);
 DnsTransaction *dns_scope_find_transaction(DnsScope *scope, DnsResourceKey *key, uint64_t query_flags);
 
 int dns_scope_notify_conflict(DnsScope *scope, DnsResourceRecord *rr);

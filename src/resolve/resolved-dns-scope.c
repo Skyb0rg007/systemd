@@ -1195,6 +1195,18 @@ void dns_scope_process_query(DnsScope *s, DnsStream *stream, DnsPacket *p) {
         }
 }
 
+uint64_t dns_scope_normalize_query_flags(DnsScope *s, uint64_t query_flags) {
+        assert(s);
+
+        /* Requesting validation only makes a difference in DNSSEC=on-request mode, in the other modes
+         * validation is done (or not done) anyway. Drop the flag there, so that transactions may be shared
+         * between clients that request validation and those that don't. */
+        if (s->dnssec_mode != DNSSEC_ON_REQUEST)
+                query_flags &= ~SD_RESOLVED_VALIDATE;
+
+        return query_flags;
+}
+
 DnsTransaction *dns_scope_find_transaction(
                 DnsScope *scope,
                 DnsResourceKey *key,
@@ -1205,16 +1217,19 @@ DnsTransaction *dns_scope_find_transaction(
         assert(scope);
         assert(key);
 
+        query_flags = dns_scope_normalize_query_flags(scope, query_flags);
+
         /* Iterate through the list of transactions with a matching key */
         first = hashmap_get(scope->transactions_by_key, key);
         LIST_FOREACH(transactions_by_key, t, first) {
 
-                /* These four flags must match exactly: we cannot use a validated response for a
+                /* These five flags must match exactly: we cannot use a validated response for a
                  * non-validating client, and we cannot use a non-validated response for a validating
                  * client. Similar, if the sources don't match things aren't usable either. */
                 if (((query_flags ^ t->query_flags) &
                      (SD_RESOLVED_NO_VALIDATE|
-                     SD_RESOLVED_NO_ZONE|
+                      SD_RESOLVED_VALIDATE|
+                      SD_RESOLVED_NO_ZONE|
                       SD_RESOLVED_NO_TRUST_ANCHOR|
                       SD_RESOLVED_NO_NETWORK)) != 0)
                         continue;

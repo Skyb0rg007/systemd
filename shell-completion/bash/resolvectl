@@ -57,7 +57,7 @@ _resolvectl() {
         [FAMILY]='tcp udp sctp'
         [BOOLEAN]='yes no'
         [RESOLVE]='yes no resolve'
-        [DNSSEC]='yes no allow-downgrade'
+        [DNSSEC]='yes no allow-downgrade on-request'
         [DNSOVERTLS]='yes no opportunistic'
     )
 

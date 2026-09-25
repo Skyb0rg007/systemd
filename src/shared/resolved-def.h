@@ -83,6 +83,11 @@
 /* Output: Result was answered by hook */
 #define SD_RESOLVED_FROM_HOOK       (UINT64_C(1) << 27)
 
+/* Input: Request DNSSEC validation, even if DNSSEC=on-request is configured (in the other modes this is
+ * the default anyway). Data that is proven to be unsigned is returned as unauthenticated. This is the
+ * equivalent of a DNS query with DO=1, CD=0. */
+#define SD_RESOLVED_VALIDATE        (UINT64_C(1) << 28)
+
 #define SD_RESOLVED_LLMNR           (SD_RESOLVED_LLMNR_IPV4|SD_RESOLVED_LLMNR_IPV6)
 #define SD_RESOLVED_MDNS            (SD_RESOLVED_MDNS_IPV4|SD_RESOLVED_MDNS_IPV6)
 #define SD_RESOLVED_PROTOCOLS_ALL   (SD_RESOLVED_MDNS|SD_RESOLVED_LLMNR|SD_RESOLVED_DNS)

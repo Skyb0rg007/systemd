@@ -1635,7 +1635,12 @@ int validate_and_mangle_query_flags(
                        SD_RESOLVED_NO_NETWORK|
                        SD_RESOLVED_NO_STALE|
                        SD_RESOLVED_RELAX_SINGLE_LABEL|
+                       SD_RESOLVED_VALIDATE|
                        ok))
+                return -EINVAL;
+
+        /* Requesting validation while turning it off makes no sense */
+        if (FLAGS_SET(*flags, SD_RESOLVED_NO_VALIDATE|SD_RESOLVED_VALIDATE))
                 return -EINVAL;
 
         if ((*flags & SD_RESOLVED_PROTOCOLS_ALL) == 0) /* If no protocol is enabled, enable all */

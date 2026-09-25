@@ -401,13 +401,15 @@ node /org/freedesktop/resolve1 {
 
       <para>The <function>SetLinkDNSSEC()</function> method enables or disables DNSSEC validation on a
       specific network interface. It takes a network interface index as well as a string that may either be
-      empty or one of <literal>yes</literal>, <literal>no</literal>, or <literal>allow-downgrade</literal>. When
+      empty or one of <literal>yes</literal>, <literal>no</literal>, <literal>allow-downgrade</literal>, or
+      <literal>on-request</literal>. When
       empty, the system-wide default DNSSEC setting is used. If <literal>yes</literal>, full DNSSEC validation
       is done for all look-ups. If the selected DNS server does not support DNSSEC, look-ups will fail if this
       mode is used. If <literal>no</literal>, DNSSEC validation is fully disabled. If
       <literal>allow-downgrade</literal>, DNSSEC validation is enabled, but is turned off automatically if the
-      selected server does not support it (thus opening up behaviour to downgrade attacks). Note that DNSSEC
-      only applies to traditional DNS, not to LLMNR or MulticastDNS.</para>
+      selected server does not support it (thus opening up behaviour to downgrade attacks). If
+      <literal>on-request</literal>, DNSSEC validation is only done for look-ups that request it via the
+      <constant>SD_RESOLVED_VALIDATE</constant> flag. Note that DNSSEC only applies to traditional DNS, not to LLMNR or MulticastDNS.</para>
 
       <para>The <function>SetLinkDNSSECNegativeTrustAnchors()</function> method may be used to configure DNSSEC
       Negative Trust Anchors (NTAs) for a specific network interface. It takes a network interface index and a
@@ -499,6 +501,9 @@ node /org/freedesktop/resolve1 {
 #define SD_RESOLVED_NO_STALE           (UINT64_C(1) &lt;&lt; 24)
 #define SD_RESOLVED_RELAX_SINGLE_LABEL (UINT64_C(1) &lt;&lt; 25)
 
+/* Input: Security */
+#define SD_RESOLVED_VALIDATE           (UINT64_C(1) &lt;&lt; 28)
+
 /* Output: Security */
 #define SD_RESOLVED_AUTHENTICATED      (UINT64_C(1) &lt;&lt;  9)
 #define SD_RESOLVED_CONFIDENTIAL       (UINT64_C(1) &lt;&lt; 18)
@@ -547,6 +552,13 @@ node /org/freedesktop/resolve1 {
 
         <para>NO_VALIDATE can be set to disable validation via DNSSEC even if it would normally be
         used.</para>
+
+        <para>VALIDATE requests DNSSEC validation for the look-up. If DNSSEC is set to
+        <literal>on-request</literal>, this enables strict DNSSEC validation for the look-up, which is otherwise
+        not done in this mode. In the other DNSSEC modes this flag has no effect, as validation is either
+        done anyway or turned off. Data that is proven to be unsigned is returned without the AUTHENTICATED
+        flag, data that fails validation results in an error. Clients that require authenticated data should check the AUTHENTICATED flag of the response (see
+        below). VALIDATE may not be combined with NO_VALIDATE.</para>
 
         <para>The next six flags allow disabling certain sources during resolution. NO_SYNTHESIZE disables
         synthetic records, e.g. the local host name, see section SYNTHETIC RECORDS in
@@ -640,7 +652,8 @@ node /org/freedesktop/resolve1 {
 
       <para>The <varname>DNSSEC</varname> property specifies current status of DNSSEC validation. It is one
       of <literal>yes</literal> (validation is enforced), <literal>no</literal> (no validation is done),
-      <literal>allow-downgrade</literal> (validation is done if the current DNS server supports it). See the
+      <literal>allow-downgrade</literal> (validation is done if the current DNS server supports it),
+      <literal>on-request</literal> (validation is only done for look-ups that request it). See the
       description of <varname>DNSSEC=</varname> in
       <citerefentry><refentrytitle>resolved.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
       </para>

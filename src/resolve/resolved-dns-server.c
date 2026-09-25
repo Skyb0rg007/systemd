@@ -298,6 +298,22 @@ static void dns_server_reset_counters(DnsServer *s) {
          * incomplete. */
 }
 
+static DnsServerFeatureLevel dns_server_best_feature_level(DnsServer *s) {
+        assert(s);
+
+        /* Determine the best feature level we care about. If DNSSEC mode is off there's no point in using anything
+         * better than EDNS0, hence don't even try. The same applies to DNSSEC=on-request mode: the lookups
+         * requesting validation use a DNSSEC feature level anyway, see dns_transaction_possible_feature_level(). */
+        if (!IN_SET(dns_server_get_dnssec_mode(s), DNSSEC_NO, DNSSEC_ON_REQUEST))
+                return dns_server_get_dns_over_tls_mode(s) == DNS_OVER_TLS_NO ?
+                        DNS_SERVER_FEATURE_LEVEL_DO :
+                        DNS_SERVER_FEATURE_LEVEL_TLS_DO;
+
+        return dns_server_get_dns_over_tls_mode(s) == DNS_OVER_TLS_NO ?
+                DNS_SERVER_FEATURE_LEVEL_EDNS0 :
+                DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN;
+}
+
 void dns_server_packet_received(DnsServer *s, int protocol, DnsServerFeatureLevel level, size_t fragsize) {
         assert(s);
 
@@ -371,6 +387,14 @@ void dns_server_packet_rrsig_missing(DnsServer *s, DnsServerFeatureLevel level) 
         if (s->verified_feature_level >= DNS_SERVER_FEATURE_LEVEL_DO)
                 s->verified_feature_level = DNS_SERVER_FEATURE_LEVEL_IS_TLS(level) ? DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN : DNS_SERVER_FEATURE_LEVEL_EDNS0;
 
+        /* If we don't care about the DNSSEC feature levels of this server (e.g. in DNSSEC=on-request mode,
+         * where only lookups requesting validation use them, and fail rather than downgrade if the RRSIGs
+         * are missing), don't remember this. It would only make dns_server_dnssec_supported() fail for
+         * all other lookups, and would never be reset, since that happens only when the grace period of a
+         * downgraded server ends. */
+        if (!DNS_SERVER_FEATURE_LEVEL_IS_DNSSEC(dns_server_best_feature_level(s)))
+                return;
+
         s->packet_rrsig_missing = true;
 }
 
@@ -383,6 +407,15 @@ void dns_server_packet_bad_opt(DnsServer *s, DnsServerFeatureLevel level) {
         /* If the OPT RR got lost, we have to downgrade what we previously verified */
         if (s->verified_feature_level >= DNS_SERVER_FEATURE_LEVEL_EDNS0)
                 s->verified_feature_level = DNS_SERVER_FEATURE_LEVEL_EDNS0-1;
+
+        /* If the OPT RR got lost in a response to a DNSSEC feature level query, but we don't care about those
+         * (e.g. in DNSSEC=on-request mode, where only lookups requesting validation use them), don't
+         * remember this either: it might only affect DNSSEC data, and would otherwise downgrade all other
+         * lookups to below EDNS0, see dns_server_packet_rrsig_missing(). If EDNS0 is broken in general,
+         * the other lookups will notice on their own. */
+        if (DNS_SERVER_FEATURE_LEVEL_IS_DNSSEC(level) &&
+            !DNS_SERVER_FEATURE_LEVEL_IS_DNSSEC(dns_server_best_feature_level(s)))
+                return;
 
         s->packet_bad_opt = true;
 }
@@ -459,20 +492,18 @@ static bool dns_server_grace_period_expired(DnsServer *s) {
 }
 
 DnsServerFeatureLevel dns_server_possible_feature_level(DnsServer *s) {
-        DnsServerFeatureLevel best;
+        DnsServerFeatureLevel best, verified;
 
         assert(s);
 
-        /* Determine the best feature level we care about. If DNSSEC mode is off there's no point in using anything
-         * better than EDNS0, hence don't even try. */
-        if (dns_server_get_dnssec_mode(s) != DNSSEC_NO)
-                best = dns_server_get_dns_over_tls_mode(s) == DNS_OVER_TLS_NO ?
-                        DNS_SERVER_FEATURE_LEVEL_DO :
-                        DNS_SERVER_FEATURE_LEVEL_TLS_DO;
-        else
-                best = dns_server_get_dns_over_tls_mode(s) == DNS_OVER_TLS_NO ?
-                        DNS_SERVER_FEATURE_LEVEL_EDNS0 :
-                        DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN;
+        best = dns_server_best_feature_level(s);
+
+        /* A DNSSEC feature level might have been verified even though we don't care about those: in
+         * DNSSEC=on-request mode lookups requesting validation use them regardless, and the DNSSEC mode might
+         * have been turned off since. Don't let that raise the feature level beyond the best one. */
+        verified = s->verified_feature_level;
+        if (DNS_SERVER_FEATURE_LEVEL_IS_DNSSEC(verified) && !DNS_SERVER_FEATURE_LEVEL_IS_DNSSEC(best))
+                verified = DNS_SERVER_FEATURE_LEVEL_IS_TLS(verified) ? DNS_SERVER_FEATURE_LEVEL_TLS_PLAIN : DNS_SERVER_FEATURE_LEVEL_EDNS0;
 
         /* Clamp the feature level the highest level we care about. The DNSSEC mode might have changed since the last
          * time, hence let's downgrade if we are still at a higher level. */
@@ -494,8 +525,8 @@ DnsServerFeatureLevel dns_server_possible_feature_level(DnsServer *s) {
 
                 dns_server_flush_cache(s);
 
-        } else if (s->possible_feature_level <= s->verified_feature_level)
-                s->possible_feature_level = s->verified_feature_level;
+        } else if (s->possible_feature_level <= verified)
+                s->possible_feature_level = verified;
         else {
                 DnsServerFeatureLevel p = s->possible_feature_level;
                 int log_level = LOG_WARNING;
