@@ -783,6 +783,24 @@ static int method_set_local_rtc(sd_bus_message *m, void *userdata, sd_bus_error 
         if (r == 0)
                 return 1;
 
+        if (fix_system) {
+                /* Setting the system clock from the RTC changes the system time, hence require the same
+                 * authorization as SetTime(). */
+                r = bus_verify_polkit_async_full(
+                                m,
+                                "org.freedesktop.timedate1.set-time",
+                                /* details= */ NULL,
+                                /* good_user= */ UID_INVALID,
+                                interactive ? POLKIT_ALLOW_INTERACTIVE : 0,
+                                &c->polkit_registry,
+                                /* ret_admin= */ NULL,
+                                error);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        return 1;
+        }
+
         if (lrtc != c->local_rtc) {
                 bool old_local_rtc = c->local_rtc;
 
