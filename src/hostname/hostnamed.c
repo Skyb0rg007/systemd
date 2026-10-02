@@ -863,16 +863,18 @@ static int context_write_data_static_hostname(Context *c) {
         return 0;
 }
 
+/* The keys in /etc/machine-info */
+static const char * const machine_info_key[_PROP_MAX] = {
+        [PROP_PRETTY_HOSTNAME]  = "PRETTY_HOSTNAME",
+        [PROP_ICON_NAME]        = "ICON_NAME",
+        [PROP_CHASSIS]          = "CHASSIS",
+        [PROP_DEPLOYMENT]       = "DEPLOYMENT",
+        [PROP_LOCATION]         = "LOCATION",
+        [PROP_TAGS]             = "TAGS",
+};
+
 static int context_write_data_machine_info(Context *c) {
         _cleanup_(unset_statp) struct stat *s = NULL;
-        static const char * const name[_PROP_MAX] = {
-                [PROP_PRETTY_HOSTNAME]  = "PRETTY_HOSTNAME",
-                [PROP_ICON_NAME]        = "ICON_NAME",
-                [PROP_CHASSIS]          = "CHASSIS",
-                [PROP_DEPLOYMENT]       = "DEPLOYMENT",
-                [PROP_LOCATION]         = "LOCATION",
-                [PROP_TAGS]             = "TAGS",
-        };
         _cleanup_strv_free_ char **l = NULL;
         int r;
 
@@ -887,9 +889,9 @@ static int context_write_data_machine_info(Context *c) {
                 return log_error_errno(r, "Failed to read '%s': %m", etc_machine_info());
 
         for (HostProperty p = _PROP_MACHINE_INFO_SETTABLE_FIRST; p <= _PROP_MACHINE_INFO_SETTABLE_LAST; p++) {
-                assert(name[p]);
+                assert(machine_info_key[p]);
 
-                if (strv_env_assign(&l, name[p], empty_to_null(c->data[p])) < 0)
+                if (strv_env_assign(&l, machine_info_key[p], empty_to_null(c->data[p])) < 0)
                         return log_oom();
         }
 
@@ -1557,7 +1559,8 @@ static int set_machine_info(Context *c, sd_bus_message *m, int prop, sd_bus_mess
         r = bus_verify_polkit_async_full(
                         m,
                         prop == PROP_PRETTY_HOSTNAME ? "org.freedesktop.hostname1.set-static-hostname" : "org.freedesktop.hostname1.set-machine-info",
-                        prop == PROP_PRETTY_HOSTNAME ? (const char**) STRV_MAKE("hostname_type", "pretty") : NULL,
+                        prop == PROP_PRETTY_HOSTNAME ? (const char**) STRV_MAKE("hostname_type", "pretty") :
+                                                       (const char**) STRV_MAKE("machine_info_key", machine_info_key[prop]),
                         /* good_user= */ UID_INVALID,
                         interactive ? POLKIT_ALLOW_INTERACTIVE : 0,
                         &c->polkit_registry,
@@ -1701,7 +1704,7 @@ static int method_set_tags(sd_bus_message *m, void *userdata, sd_bus_error *erro
         r = bus_verify_polkit_async_full(
                         m,
                         "org.freedesktop.hostname1.set-machine-info",
-                        /* details= */ NULL,
+                        (const char**) STRV_MAKE("machine_info_key", machine_info_key[PROP_TAGS]),
                         /* good_user= */ UID_INVALID,
                         /* flags= */ 0,
                         &c->polkit_registry,
@@ -1791,7 +1794,7 @@ static int method_add_and_remove_tags(sd_bus_message *m, void *userdata, sd_bus_
         r = bus_verify_polkit_async_full(
                         m,
                         "org.freedesktop.hostname1.set-machine-info",
-                        /* details= */ NULL,
+                        (const char**) STRV_MAKE("machine_info_key", machine_info_key[PROP_TAGS]),
                         /* good_user= */ UID_INVALID,
                         /* flags= */ 0,
                         &c->polkit_registry,
@@ -2475,7 +2478,8 @@ static int vl_set_machine_info(sd_varlink *link, sd_json_variant *parameters, vo
                         link,
                         c->bus,
                         polkit_action,
-                        prop == PROP_PRETTY_HOSTNAME ? (const char**) STRV_MAKE("hostname_type", "pretty") : NULL,
+                        prop == PROP_PRETTY_HOSTNAME ? (const char**) STRV_MAKE("hostname_type", "pretty") :
+                                                       (const char**) STRV_MAKE("machine_info_key", machine_info_key[prop]),
                         &c->polkit_registry);
         if (r <= 0)
                 return r;
@@ -2589,7 +2593,7 @@ static int vl_method_set_tags(sd_varlink *link, sd_json_variant *parameters, sd_
                         link,
                         c->bus,
                         "org.freedesktop.hostname1.set-machine-info",
-                        /* details= */ NULL,
+                        (const char**) STRV_MAKE("machine_info_key", machine_info_key[PROP_TAGS]),
                         &c->polkit_registry);
         if (r <= 0)
                 return r;
