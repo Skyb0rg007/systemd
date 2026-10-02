@@ -1036,7 +1036,7 @@ static int method_clean_pool(sd_bus_message *message, void *userdata, sd_bus_err
 
                 r = bus_verify_polkit_async(
                                 message,
-                                "org.freedesktop.machine1.manage-machines",
+                                "org.freedesktop.machine1.manage-images",
                                 details,
                                 &m->polkit_registry,
                                 error);
@@ -1076,7 +1076,7 @@ static int method_set_pool_limit(sd_bus_message *message, void *userdata, sd_bus
 
                 r = bus_verify_polkit_async(
                                 message,
-                                "org.freedesktop.machine1.manage-machines",
+                                "org.freedesktop.machine1.manage-images",
                                 details,
                                 &m->polkit_registry,
                                 error);
