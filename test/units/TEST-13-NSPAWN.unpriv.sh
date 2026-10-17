@@ -68,7 +68,8 @@ EOF
 loginctl enable-linger testuser
 
 run0 -u testuser mkdir -p .config/systemd/nspawn/
-run0 -u testuser -i "echo -e \"[Exec]\nKillSignal=SIGKILL\n\" >.config/systemd/nspawn/zurps.nspawn"
+# zurps' PID 1 ("sleep infinity") ignores KillSignal= (SIGRTMIN+3), which checks below that terminating
+# doesn't need the payload's cooperation.
 run0 -u testuser systemctl start --user systemd-machined.socket
 run0 -u testuser systemctl start --user systemd-nspawn@zurps.service
 
@@ -82,9 +83,17 @@ run0 -u testuser machinectl --user status zurps
 run0 -u testuser machinectl --user status zurps | grep "Unit: systemd-nspawn@zurps.service"
 run0 -u testuser machinectl --user status zurps | grep "Subgroup: payload"
 run0 -u testuser machinectl --user kill --signal=SIGCONT zurps
+# zurps ignores the shutdown request that nspawn forwards, so it's killed after machined's timeout (10 s)...
 machinectl terminate zurps
-
-(! run0 -u testuser systemctl is-active --user systemd-nspawn@zurps.service)
+timeout 30 bash -c "while machinectl status zurps &>/dev/null; do sleep .5; done"
+timeout 10 bash -c "while run0 -u testuser systemctl is-active --user systemd-nspawn@zurps.service &>/dev/null; do sleep .5; done"
+# ... or right away when it's terminated again
+run0 -u testuser systemctl start --user systemd-nspawn@zurps.service
+machinectl status zurps
+machinectl terminate zurps
+machinectl terminate zurps
+timeout 5 bash -c "while machinectl status zurps &>/dev/null; do sleep .5; done"
+timeout 10 bash -c "while run0 -u testuser systemctl is-active --user systemd-nspawn@zurps.service &>/dev/null; do sleep .5; done"
 
 (! run0 -u testuser \
     busctl call \

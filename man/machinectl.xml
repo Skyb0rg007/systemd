@@ -317,10 +317,14 @@
       <varlistentry>
         <term><command>terminate</command> <replaceable>NAME</replaceable>…</term>
 
-        <listitem><para>Immediately terminates a virtual machine or
-        container, without cleanly shutting it down. This kills all
+        <listitem><para>Terminates a virtual machine or container,
+        without waiting for it to shut down cleanly. This kills all
         processes of the virtual machine or container and deallocates
-        all resources attached to that instance. Use
+        all resources attached to that instance. If the machine has a
+        supervisor process, such as <command>systemd-nspawn</command> or
+        <command>systemd-vmspawn</command>, the supervisor is asked to stop
+        the machine first, and the machine's processes are killed if it is
+        still running 10 s later, or when it is terminated again. Use
         <command>poweroff</command> to issue a clean shutdown
         request.</para>
 

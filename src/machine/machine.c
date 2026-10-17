@@ -42,10 +42,14 @@
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "time-util.h"
 #include "tmpfile-util.h"
 #include "uid-range.h"
 #include "unit-name.h"
 #include "user-util.h"
+
+/* How long Terminate gives the supervisor of a machine to shut it down cleanly before killing it */
+#define MACHINE_TERMINATE_TIMEOUT_USEC (10 * USEC_PER_SEC)
 
 int machine_new(MachineClass class, const char *name, Machine **ret) {
         _cleanup_(machine_freep) Machine *m = NULL;
@@ -140,6 +144,8 @@ Machine* machine_free(Machine *m) {
         sd_bus_message_unref(m->create_message);
 
         m->cgroup_empty_event_source = sd_event_source_disable_unref(m->cgroup_empty_event_source);
+
+        m->terminate_timeout_event_source = sd_event_source_disable_unref(m->terminate_timeout_event_source);
 
         free(m->name);
 
@@ -708,6 +714,49 @@ int machine_start(Machine *m, sd_bus_message *properties, sd_bus_error *error) {
         return 0;
 }
 
+static int machine_kill_payload(Machine *m) {
+        int r;
+
+        assert(m);
+
+        if (m->unit && m->subgroup) {
+                /* The machine runs in a subgroup of a unit that it shares with others, e.g. with its
+                 * supervisor in systemd-nspawn@.service (DelegateSubgroup=supervisor), or with the user's
+                 * service manager in user@.service. We can't stop that unit, but we can kill the subgroup's
+                 * processes. The supervisor notices that its payload is gone, and cleans up. */
+                _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+
+                r = manager_kill_unit(m->manager, m->unit, m->subgroup, SIGKILL, &error);
+                if (r >= 0)
+                        return 0;
+
+                log_debug_errno(r, "Failed to kill subgroup '%s' of unit '%s' of machine '%s', trying the supervisor: %s",
+                                m->subgroup, m->unit, m->name, bus_error_message(&error, r));
+        }
+
+        if (!pidref_is_set(&m->supervisor))
+                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "Don't know how to terminate machine '%s'.", m->name);
+
+        /* systemd-nspawn takes a second SIGTERM as a request to terminate immediately. */
+        r = pidref_kill(&m->supervisor, SIGTERM);
+        if (r < 0)
+                return log_error_errno(r, "Failed to kill supervisor process " PID_FMT " of machine '%s': %m", m->supervisor.pid, m->name);
+
+        return 0;
+}
+
+static int machine_dispatch_terminate_timeout(sd_event_source *s, uint64_t usec, void *userdata) {
+        Machine *m = ASSERT_PTR(userdata);
+
+        m->terminate_timeout_event_source = sd_event_source_disable_unref(m->terminate_timeout_event_source);
+
+        log_info("Machine '%s' did not shut down within %s of being terminated, killing it.",
+                 m->name, FORMAT_TIMESPAN(MACHINE_TERMINATE_TIMEOUT_USEC, USEC_PER_SEC));
+
+        (void) machine_kill_payload(m);
+        return 0;
+}
+
 int machine_stop(Machine *m) {
         int r;
 
@@ -729,13 +778,32 @@ int machine_stop(Machine *m) {
 
                 free_and_replace(m->scope_job, job);
 
-        } else if (pidref_is_set(&m->supervisor)) {
-                /* Otherwise, send a friendly SIGTERM to the supervisor */
+        } else if (m->stopping || !pidref_is_set(&m->supervisor)) {
+                /* Asked to terminate again, or there's no supervisor to ask: don't wait any longer. */
+                m->terminate_timeout_event_source = sd_event_source_disable_unref(m->terminate_timeout_event_source);
+
+                r = machine_kill_payload(m);
+                if (r < 0)
+                        return r;
+        } else {
+                /* Otherwise, send a friendly SIGTERM to the supervisor. systemd-nspawn and systemd-vmspawn
+                 * may take that as a request for a clean shutdown, which the payload may ignore, so kill the
+                 * payload if the machine is still around after a while. */
                 r = pidref_kill(&m->supervisor, SIGTERM);
                 if (r < 0)
                         return log_error_errno(r, "Failed to kill supervisor process " PID_FMT " of machine '%s': %m", m->supervisor.pid, m->name);
-        } else
-                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "Don't know how to terminate machine '%s'.", m->name);
+
+                r = sd_event_add_time_relative(
+                                m->manager->event,
+                                &m->terminate_timeout_event_source,
+                                CLOCK_MONOTONIC,
+                                MACHINE_TERMINATE_TIMEOUT_USEC, /* accuracy= */ 0,
+                                machine_dispatch_terminate_timeout, m);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to install terminate timeout for machine '%s', ignoring: %m", m->name);
+                else
+                        (void) sd_event_source_set_description(m->terminate_timeout_event_source, "machine-terminate-timeout");
+        }
 
         m->stopping = true;
 

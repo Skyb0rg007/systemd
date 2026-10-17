@@ -73,14 +73,16 @@ typedef struct Machine {
          * send signals and so on.
          *
          * Supervisor: the process that supervises the machine, if there is any and if that process is
-         * responsible for a single machine. Sending SIGTERM to this process should (non-cooperatively)
-         * terminate the machine. */
+         * responsible for a single machine. Sending SIGTERM to this process asks it to terminate the
+         * machine, which it may do cooperatively, i.e. only once the payload shuts down cleanly. */
         PidRef leader, supervisor;
         sd_event_source *leader_pidfd_event_source, *supervisor_pidfd_event_source;
 
         dual_timestamp timestamp;
 
         sd_event_source *cgroup_empty_event_source;
+
+        sd_event_source *terminate_timeout_event_source;
 
         bool in_gc_queue:1;
         bool started:1;
