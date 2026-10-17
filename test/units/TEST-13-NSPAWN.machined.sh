@@ -213,6 +213,20 @@ test -d /var/lib/machines/.hidden1
 machinectl clean
 test ! -d /var/lib/machines/.hidden1
 
+# Hidden images that an .mstack image uses as layers (as importd creates them for OCI images) are kept, also
+# in .v/ directories, unless the .mstack image is removed too
+mkdir -p /var/lib/machines/{.layer-used,.layer-versioned,.layer-unused,.layer-of-hidden}/etc
+mkdir -p /var/lib/machines/layered.mstack/{rw,layer@1.v} /var/lib/machines/.hidden-layered.mstack
+ln -s ../.layer-used /var/lib/machines/layered.mstack/layer@0
+ln -s ../../.layer-versioned /var/lib/machines/layered.mstack/layer@1.v/layer_1
+ln -s ../.layer-of-hidden /var/lib/machines/.hidden-layered.mstack/layer@0
+machinectl clean
+test -d /var/lib/machines/.layer-used
+test -d /var/lib/machines/.layer-versioned
+test ! -e /var/lib/machines/.layer-unused
+test ! -e /var/lib/machines/.hidden-layered.mstack
+test ! -e /var/lib/machines/.layer-of-hidden
+
 if can_do_rootless_nspawn; then
     mkdir /var/lib/machines/foreign-error-source
     chown foreign-0:foreign-0 /var/lib/machines/foreign-error-source
@@ -276,6 +290,9 @@ grep -E "linked\s+raw" /tmp/out.log
 rm -f /var/lib/machines/linked.{squashfs,raw} /tmp/out.log
 
 timeout 30 bash -c "until machinectl clean --all; do sleep .5; done"
+test ! -e /var/lib/machines/layered.mstack
+test ! -e /var/lib/machines/.layer-used
+test ! -e /var/lib/machines/.layer-versioned
 
 NSPAWN_FRAGMENT="machinectl-test-$RANDOM.nspawn"
 cat >"/var/lib/machines/$NSPAWN_FRAGMENT" <<EOF

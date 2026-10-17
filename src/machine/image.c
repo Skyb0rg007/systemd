@@ -15,7 +15,11 @@
 #include "machined.h"
 #include "operation.h"
 #include "process-util.h"
+#include "recurse-dir.h"
+#include "set.h"
+#include "stat-util.h"
 #include "string-table.h"
+#include "string-util.h"
 #include "tmpfile-util.h"
 
 int clean_pool_read_first_entry(FILE *file, int child_error, sd_bus_error *error) {
@@ -93,6 +97,164 @@ int clean_pool_read_next_entry(FILE *file, char **ret_name, uint64_t *ret_usage)
         return 1;
 }
 
+static int inodes_add(Set **inodes, int dir_fd, const char *name) {
+        int r;
+
+        assert(inodes);
+        assert(dir_fd >= 0);
+        assert(name);
+
+        _cleanup_free_ struct stat *st = new(struct stat, 1);
+        if (!st)
+                return -ENOMEM;
+
+        if (fstatat(dir_fd, name, st, /* flags= */ 0) < 0) {
+                /* E.g. a dangling symlink, which refers to no image */
+                log_debug_errno(errno, "Failed to stat '%s', ignoring: %m", name);
+                return 0;
+        }
+
+        r = set_ensure_consume(inodes, &inode_hash_ops, TAKE_PTR(st));
+        if (r < 0)
+                return r;
+
+        return 0;
+}
+
+static int mstack_collect_inodes(Image *image, Set **inodes) {
+        int r;
+
+        assert(image);
+        assert(image->type == IMAGE_MSTACK);
+        assert(inodes);
+
+        /* Collects the inodes that the entries of an .mstack image refer to, including all versions in .v/
+         * directories. Its layers are typically symlinks to hidden images in the same pool (as importd
+         * creates them for OCI images), which hence are still in use. */
+
+        _cleanup_close_ int dir_fd = open(image->path, O_DIRECTORY|O_CLOEXEC);
+        if (dir_fd < 0)
+                return -errno;
+
+        _cleanup_free_ DirectoryEntries *de = NULL;
+        r = readdir_all(dir_fd, RECURSE_DIR_IGNORE_DOT, &de);
+        if (r < 0)
+                return r;
+
+        FOREACH_ARRAY(i, de->entries, de->n_entries) {
+                const char *fname = (*i)->d_name;
+
+                r = inodes_add(inodes, dir_fd, fname);
+                if (r < 0)
+                        return r;
+
+                if (!endswith(fname, ".v"))
+                        continue;
+
+                _cleanup_free_ DirectoryEntries *vde = NULL;
+                _cleanup_close_ int v_fd = openat(dir_fd, fname, O_DIRECTORY|O_CLOEXEC);
+                if (v_fd < 0) {
+                        log_debug_errno(errno, "Failed to open '%s/%s', ignoring: %m", image->path, fname);
+                        continue;
+                }
+
+                r = readdir_all(v_fd, RECURSE_DIR_IGNORE_DOT, &vde);
+                if (r < 0)
+                        return r;
+
+                FOREACH_ARRAY(j, vde->entries, vde->n_entries) {
+                        r = inodes_add(inodes, v_fd, (*j)->d_name);
+                        if (r < 0)
+                                return r;
+                }
+        }
+
+        return 0;
+}
+
+static int image_is_used_by_mstack(Image *image, Set *inodes) {
+        struct stat st;
+
+        assert(image);
+
+        if (set_isempty(inodes))
+                return false;
+
+        if (stat(image->path, &st) < 0)
+                return -errno;
+
+        return set_contains(inodes, &st);
+}
+
+/* Runs in the (sd-clean) child, and exits it on failure. inodes are those used by .mstack images. */
+static void clean_pool_one(
+                Manager *manager,
+                ImageCleanPoolMode mode,
+                Image *image,
+                Set *inodes,
+                int result_fd,
+                int errno_fd) {
+
+        ssize_t n;
+        int r;
+
+        assert(manager);
+        assert(image);
+        assert(result_fd >= 0);
+        assert(errno_fd >= 0);
+
+        /* We can't remove vendor images (i.e. those in /usr) */
+        if (image_is_vendor(image))
+                return;
+        if (image_is_host(image))
+                return;
+        if (mode == IMAGE_CLEAN_POOL_REMOVE_HIDDEN && !image_is_hidden(image))
+                return;
+
+        r = image_is_used_by_mstack(image, inodes);
+        if (r < 0) {
+                log_debug_errno(r, "Failed to check whether image '%s' is used by an .mstack image: %m", image->name);
+                report_errno_and_exit(errno_fd, r);
+        }
+        if (r > 0) {
+                log_debug("Keeping image '%s' because an .mstack image uses it.", image->name);
+                return;
+        }
+
+        r = image_remove(image, manager->runtime_scope);
+        if (r == -EBUSY) {
+                log_debug("Keeping image '%s' because it's currently used.", image->name);
+                return;
+        }
+        if (r < 0) {
+                bool success = false;
+
+                log_debug_errno(r, "Failed to remove image '%s': %m", image->name);
+
+                /* If the operation failed, let's override everything we wrote, and instead write there at which image we failed. */
+                if (ftruncate(result_fd, 0) < 0 ||
+                    lseek(result_fd, 0, SEEK_SET) < 0 ||
+                    write(result_fd, &success, sizeof(success)) < 0 ||
+                    write(result_fd, image->name, strlen(image->name)+1) < 0)
+                        log_debug_errno(errno, "Failed to truncate, rewind, or write to tmp file, ignoring: %m");
+
+                /* Report original error code (not results of rewind/truncate/etc */
+                report_errno_and_exit(errno_fd, r);
+        }
+
+        n = loop_write(result_fd, image->name, strlen(image->name) + 1);
+        if (n < 0) {
+                log_debug_errno(n, "Failed to write image name to tmp file: %m");
+                report_errno_and_exit(errno_fd, n);
+        }
+
+        n = loop_write(result_fd, &image->usage_exclusive, sizeof(image->usage_exclusive));
+        if (n < 0) {
+                log_debug_errno(n, "Failed to write image's usage to tmp file: %m");
+                report_errno_and_exit(errno_fd, n);
+        }
+}
+
 int image_clean_pool_operation(Manager *manager, ImageCleanPoolMode mode, Operation **ret_operation) {
         _cleanup_close_pair_ int errno_pipe_fd[2] = EBADF_PAIR;
         _cleanup_close_ int result_fd = -EBADF;
@@ -133,48 +295,30 @@ int image_clean_pool_operation(Manager *manager, ImageCleanPoolMode mode, Operat
                         report_errno_and_exit(errno_pipe_fd[1], n);
                 }
 
+                /* Remove .mstack images first, since with mode=all, their layers are only unused once they
+                 * are gone. Then remove everything else that the remaining .mstack images don't use. */
                 Image *image;
+                HASHMAP_FOREACH(image, images)
+                        if (image->type == IMAGE_MSTACK)
+                                clean_pool_one(manager, mode, image, /* inodes= */ NULL, result_fd, errno_pipe_fd[1]);
+
+                _cleanup_set_free_ Set *inodes = NULL;
                 HASHMAP_FOREACH(image, images) {
-                        /* We can't remove vendor images (i.e. those in /usr) */
-                        if (image_is_vendor(image))
-                                continue;
-                        if (image_is_host(image))
-                                continue;
-                        if (mode == IMAGE_CLEAN_POOL_REMOVE_HIDDEN && !image_is_hidden(image))
+                        if (image->type != IMAGE_MSTACK)
                                 continue;
 
-                        r = image_remove(image, manager->runtime_scope);
-                        if (r == -EBUSY) {
-                                log_debug("Keeping image '%s' because it's currently used.", image->name);
+                        r = mstack_collect_inodes(image, &inodes);
+                        if (r == -ENOENT) /* Just removed */
                                 continue;
-                        }
                         if (r < 0) {
-                                log_debug_errno(r, "Failed to remove image '%s': %m", image->name);
-                                success = false;
-
-                                /* If the operation failed, let's override everything we wrote, and instead write there at which image we failed. */
-                                if (ftruncate(result_fd, 0) < 0 ||
-                                    lseek(result_fd, 0, SEEK_SET) < 0 ||
-                                    write(result_fd, &success, sizeof(success)) < 0 ||
-                                    write(result_fd, image->name, strlen(image->name)+1) < 0)
-                                        log_debug_errno(errno, "Failed to truncate, rewind, or write to tmp file, ignoring: %m");
-
-                                /* Report original error code (not results of rewind/truncate/etc */
+                                log_debug_errno(r, "Failed to determine layers of image '%s': %m", image->name);
                                 report_errno_and_exit(errno_pipe_fd[1], r);
                         }
-
-                        n = loop_write(result_fd, image->name, strlen(image->name) + 1);
-                        if (n < 0) {
-                                log_debug_errno(n, "Failed to write image name to tmp file: %m");
-                                report_errno_and_exit(errno_pipe_fd[1], n);
-                        }
-
-                        n = loop_write(result_fd, &image->usage_exclusive, sizeof(image->usage_exclusive));
-                        if (n < 0) {
-                                log_debug_errno(n, "Failed to write image's usage to tmp file: %m");
-                                report_errno_and_exit(errno_pipe_fd[1], n);
-                        }
                 }
+
+                HASHMAP_FOREACH(image, images)
+                        if (image->type != IMAGE_MSTACK)
+                                clean_pool_one(manager, mode, image, inodes, result_fd, errno_pipe_fd[1]);
 
                 result_fd = safe_close(result_fd);
                 _exit(EXIT_SUCCESS);
