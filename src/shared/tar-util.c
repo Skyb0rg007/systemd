@@ -12,6 +12,7 @@
 #include "alloc-util.h"
 #include "chase.h"
 #include "chattr-util.h"
+#include "devnum-util.h"
 #include "fd-util.h"
 #include "fs-util.h"
 #include "iovec-util.h"
@@ -462,7 +463,9 @@ static int archive_unpack_special_inode(
                 int parent_fd,
                 const char *filename,
                 const char *path,
-                mode_t filetype) {
+                mode_t filetype,
+                TarFlags flags,
+                int *ret_fd) {
 
         int r;
 
@@ -471,6 +474,7 @@ static int archive_unpack_special_inode(
         assert(parent_fd >= 0);
         assert(filename);
         assert(path);
+        assert(ret_fd);
 
         dev_t major = 0, minor = 0;
         if (IN_SET(filetype, S_IFCHR, S_IFBLK)) {
@@ -479,8 +483,23 @@ static int archive_unpack_special_inode(
         }
 
         r = mknodat_atomic(parent_fd, filename, filetype | 0000, makedev(major, minor));
-        if (r < 0)
+        if (r < 0) {
+                /* Creating character and block devices requires CAP_MKNOD in the initial user namespace
+                 * (except for the 0:0 character device, i.e. overlayfs whiteouts). If we are unpacking in a
+                 * user namespace, skip them, as other unprivileged unpackers do. They are useless in a
+                 * container anyway, since the container manager provides /dev. */
+                if (FLAGS_SET(flags, TAR_SKIP_DEVICE_NODES) &&
+                    IN_SET(filetype, S_IFCHR, S_IFBLK) &&
+                    ERRNO_IS_NEG_PRIVILEGE(r)) {
+                        log_warning_errno(r, "Not permitted to create %s device node '%s' (" DEVNUM_FORMAT_STR "), skipping: %m",
+                                          filetype == S_IFCHR ? "character" : "block",
+                                          path, DEVNUM_FORMAT_VAL(makedev(major, minor)));
+                        *ret_fd = -EBADF;
+                        return 0;
+                }
+
                 return log_error_errno(r, "Failed to create special node '%s': %m", path);
+        }
 
         _cleanup_close_ int fd = openat(parent_fd, filename, O_CLOEXEC|O_PATH|O_NOFOLLOW);
         if (fd < 0)
@@ -494,7 +513,8 @@ static int archive_unpack_special_inode(
                 return log_error_errno(SYNTHETIC_ERRNO(ENODEV),
                                        "Special node '%s' we just created is of a wrong type: %m", path);
 
-        return TAKE_FD(fd);
+        *ret_fd = TAKE_FD(fd);
+        return 1;
 }
 
 static int archive_entry_pathname_safe(struct archive_entry *entry, const char **ret) {
@@ -1050,9 +1070,11 @@ int tar_x(int input_fd, int tree_fd, TarFlags flags) {
                                 case S_IFBLK:
                                 case S_IFIFO:
                                 case S_IFSOCK:
-                                        fd = archive_unpack_special_inode(a, entry, parent_fd, e, j, filetype);
-                                        if (fd < 0)
-                                                return fd;
+                                        r = archive_unpack_special_inode(a, entry, parent_fd, e, j, filetype, flags, &fd);
+                                        if (r < 0)
+                                                return r;
+
+                                        /* NB: if skipped, this does not create an inode! */
                                         break;
 
                                 default:
