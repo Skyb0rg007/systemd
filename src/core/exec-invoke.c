@@ -2240,19 +2240,6 @@ static int apply_private_devices(const ExecContext *c, const ExecParameters *p) 
         return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_RAW_IO, SCMP_ACT_ERRNO(EPERM), /* log_missing= */ false);
 }
 
-static int apply_restrict_namespaces(const ExecContext *c, const ExecParameters *p) {
-        assert(c);
-        assert(p);
-
-        if (!exec_context_restrict_namespaces_set(c))
-                return 0;
-
-        if (skip_seccomp_unavailable("RestrictNamespaces="))
-                return 0;
-
-        return seccomp_restrict_namespaces(c->restrict_namespaces);
-}
-
 static int apply_lock_personality(const ExecContext *c, const ExecParameters *p) {
         unsigned long personality;
         int r;
@@ -2299,6 +2286,35 @@ static int apply_restrict_ptrace(const ExecContext *c, const ExecParameters *p, 
         }
 
         return r;
+}
+
+static int apply_restrict_namespaces(const ExecContext *c, const ExecParameters *p, LandlockRuleset *landlock) {
+        assert(c);
+        assert(p);
+        assert(landlock);
+
+        if (!exec_context_restrict_namespaces_set(c))
+                return 0;
+
+        /* Landlock can also restrict clone3(), whose flags seccomp cannot inspect, so that the seccomp
+         * implementation has to block clone3() altogether. However, every Landlock domain also restricts
+         * ptrace access to processes outside of it, hence Landlock is only used if RestrictPtrace= is
+         * enabled as well. The Landlock restriction is only recorded here, and enforced later together with
+         * all other Landlock restrictions. Recording it can only fail if Landlock cannot be used for this
+         * (landlock_ruleset_restrict_namespaces() logs why), in which case we fall back to seccomp, so
+         * failures of this function are always seccomp failures. */
+        if (c->restrict_ptrace && landlock_ruleset_restrict_namespaces(landlock, c->restrict_namespaces) >= 0)
+                return 0;
+
+#if HAVE_SECCOMP
+        if (skip_seccomp_unavailable("RestrictNamespaces="))
+                return 0;
+
+        return seccomp_restrict_namespaces(c->restrict_namespaces);
+#else
+        log_debug("Seccomp support is not compiled in, skipping RestrictNamespaces=.");
+        return 0;
+#endif
 }
 
 #if HAVE_LIBBPF
@@ -7306,6 +7322,12 @@ int exec_invoke(
                         return log_error_errno(r, "Failed to apply ptrace restrictions: %m");
                 }
 
+                r = apply_restrict_namespaces(context, params, &landlock);
+                if (r < 0) {
+                        *exit_status = EXIT_SECCOMP;
+                        return log_error_errno(r, "Failed to apply namespace restrictions: %m");
+                }
+
 #if HAVE_SECCOMP
                 r = apply_address_families(context, params);
                 if (r < 0) {
@@ -7329,12 +7351,6 @@ int exec_invoke(
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         return log_error_errno(r, "Failed to apply SUID/SGID restrictions: %m");
-                }
-
-                r = apply_restrict_namespaces(context, params);
-                if (r < 0) {
-                        *exit_status = EXIT_SECCOMP;
-                        return log_error_errno(r, "Failed to apply namespace restrictions: %m");
                 }
 
                 r = apply_protect_sysctl(context, params);

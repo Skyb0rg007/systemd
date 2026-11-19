@@ -2709,21 +2709,32 @@ RestrictFileSystems=ext4</programlisting>
         inaccessible, all unlisted ones are permitted (deny-listing). If the empty string is assigned, the default
         namespace restrictions are applied, which is equivalent to false. This option may appear more than once, in
         which case the namespace types are merged by <constant>OR</constant>, or by <constant>AND</constant> if the
-        lines are prefixed with <literal>~</literal> (see examples below). Internally, this setting limits access to
-        the <citerefentry><refentrytitle>unshare</refentrytitle><manvolnum>2</manvolnum></citerefentry>,
-        <citerefentry><refentrytitle>clone</refentrytitle><manvolnum>2</manvolnum></citerefentry> and
-        <citerefentry><refentrytitle>setns</refentrytitle><manvolnum>2</manvolnum></citerefentry> system calls, taking
-        the specified flags parameters into account. Note that — if this option is used — in addition to restricting
-        creation and switching of the specified types of namespaces (or all of them, if true) access to the
-        <function>setns()</function> system call with a zero flags parameter is prohibited. If mount namespaces are
-        restricted, the other ways of creating mount namespaces are prohibited as well:
-        <function>unshare()</function> with the <constant>UNSHARE_EMPTY_MNTNS</constant> flag,
-        <citerefentry><refentrytitle>open_tree</refentrytitle><manvolnum>2</manvolnum></citerefentry> and
-        <function>open_tree_attr()</function> with the <constant>OPEN_TREE_CLONE</constant> or
-        <constant>OPEN_TREE_NAMESPACE</constant> flags, and
-        <citerefentry><refentrytitle>fsmount</refentrytitle><manvolnum>2</manvolnum></citerefentry>.
-        This setting is only supported on x86, x86-64, mips, mips-le, mips64, mips64-le, mips64-n32,
-        mips64-le-n32, ppc64, ppc64-le, s390 and s390x, and enforces no restrictions on other architectures.</para>
+        lines are prefixed with <literal>~</literal> (see examples below).</para>
+
+        <para>If <varname>RestrictPtrace=</varname> is enabled as well and the kernel supports Landlock
+        namespace restrictions (Landlock ABI version 12, Linux 7.4 or newer), this setting is enforced via
+        Landlock. In that case, creating namespaces of the restricted types
+        via <citerefentry><refentrytitle>unshare</refentrytitle><manvolnum>2</manvolnum></citerefentry>,
+        <citerefentry><refentrytitle>clone</refentrytitle><manvolnum>2</manvolnum></citerefentry> or
+        <citerefentry><refentrytitle>clone3</refentrytitle><manvolnum>2</manvolnum></citerefentry>, joining them via
+        <citerefentry><refentrytitle>setns</refentrytitle><manvolnum>2</manvolnum></citerefentry>, and creating mount
+        namespaces via <citerefentry><refentrytitle>open_tree</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+        or <citerefentry><refentrytitle>fsmount</refentrytitle><manvolnum>2</manvolnum></citerefentry> is prohibited,
+        on all architectures.</para>
+
+        <para>Otherwise, this setting limits access to the <function>unshare()</function>,
+        <function>clone()</function> and <function>setns()</function> system calls via seccomp, taking the
+        specified flags parameters into account. Note that in this case — if this option is used — in addition to
+        restricting creation and switching of the specified types of namespaces (or all of them, if true) access to
+        the <function>setns()</function> system call with a zero flags parameter is prohibited, and the
+        <function>clone3()</function> system call is blocked entirely, as its flags parameter cannot be inspected
+        by seccomp. If mount namespaces are restricted, the other ways of creating mount namespaces are
+        prohibited as well: <function>unshare()</function> with the <constant>UNSHARE_EMPTY_MNTNS</constant>
+        flag, <function>open_tree()</function> and <function>open_tree_attr()</function> with the
+        <constant>OPEN_TREE_CLONE</constant> or <constant>OPEN_TREE_NAMESPACE</constant> flags, and
+        <function>fsmount()</function>. The seccomp fallback is only supported on x86, x86-64, mips, mips-le,
+        mips64, mips64-le, mips64-n32, mips64-le-n32, ppc64, ppc64-le, s390 and s390x, and enforces no
+        restrictions on other architectures.</para>
 
         <para>Example: if a unit has the following,
         <programlisting>RestrictNamespaces=cgroup ipc
@@ -2800,7 +2811,8 @@ RestrictNamespaces=~cgroup net</programlisting>
         such as the main process. Defaults to false.</para>
 
         <para>This setting is implemented with Landlock and requires Landlock ABI version 12 (Linux 7.4 or
-        newer). On older kernels, it has no effect.</para>
+        newer). On older kernels, it has no effect. If enabled, <varname>RestrictNamespaces=</varname> is
+        enforced via Landlock as well, if the kernel supports it, see above.</para>
 
         <xi:include href="version-info.xml" xpointer="v263"/></listitem>
       </varlistentry>
