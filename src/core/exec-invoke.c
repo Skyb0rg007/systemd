@@ -2833,8 +2833,215 @@ static int delegate_cgroup_to_managed_userns(
         return 1;
 }
 
+typedef struct ManagedUserNamespaceSetup {
+        sd_varlink *nsresource_link;
+        sd_varlink *mountfsd_link;
+
+        /* Host directories to acquire ID-mapped mounts of, and the acquired mounts */
+        char **cover_paths;
+        IdmappedCover *covers;
+        size_t n_covers;
+} ManagedUserNamespaceSetup;
+
+static void managed_user_namespace_setup_done(ManagedUserNamespaceSetup *m) {
+        assert(m);
+
+        m->cover_paths = strv_free(m->cover_paths);
+        idmapped_cover_free_many(m->covers, m->n_covers);
+        m->covers = NULL;
+        m->n_covers = 0;
+}
+
+static int topmost_owned_directory(const char *path, uid_t uid, char **ret) {
+        _cleanup_free_ char *canonical = NULL, *found = NULL;
+        uint64_t mnt_id = 0;
+        int r;
+
+        assert(path);
+        assert(ret);
+
+        /* Finds the topmost directory among the specified path and its parents that is owned by the
+         * specified UID and on the same mount as the deepest existing one of them, since the ID-mapped mount
+         * we'll cover it with does not include submounts. Returns 0 and NULL if there is none. */
+
+        r = chase(path, /* root= */ NULL, CHASE_NONEXISTENT, &canonical, /* ret_fd= */ NULL);
+        if (r < 0)
+                return r;
+
+        char *prefix = newa(char, strlen(canonical) + 1);
+        PATH_FOREACH_PREFIX_MORE(prefix, canonical) {
+                uint64_t id;
+                struct stat st;
+
+                if (isempty(prefix)) /* The root directory itself */
+                        break;
+
+                if (stat(prefix, &st) < 0) {
+                        if (errno == ENOENT)
+                                continue;
+
+                        return -errno;
+                }
+
+                r = path_get_unique_mnt_id_at(AT_FDCWD, prefix, &id);
+                if (r < 0)
+                        return r;
+
+                if (mnt_id == 0)
+                        mnt_id = id;
+                else if (id != mnt_id)
+                        break;
+
+                if (!S_ISDIR(st.st_mode) || st.st_uid != uid)
+                        continue;
+
+                r = free_and_strdup(&found, prefix);
+                if (r < 0)
+                        return r;
+        }
+
+        *ret = TAKE_PTR(found);
+        return 0;
+}
+
+static int collect_cover_paths(
+                const ExecContext *context,
+                const ExecParameters *params,
+                const ExecRuntime *runtime,
+                uid_t uid,
+                char ***ret) {
+
+        _cleanup_strv_free_ char **candidates = NULL, **paths = NULL;
+        int r;
+
+        assert(context);
+        assert(params);
+        assert(ret);
+
+        *ret = NULL;
+
+        /* In a managed user namespace we lose access to everything owned by the service manager's user,
+         * since that user is not mapped into it. This collects the directories below which we will need
+         * to bind mount from (i.e. the runtime directory with the credentials and notification socket in
+         * it, the parents of the configured state/cache/... directories, of BindPaths=, MountImages=,
+         * ExtensionImages= and ExtensionDirectories= sources and of PrivateTmp= directories), and for each
+         * of them the topmost directory owned by the service
+         * manager's user, so that we can cover it with an ID-mapped mount. */
+
+        if (params->runtime_scope != RUNTIME_SCOPE_USER)
+                return 0;
+
+        for (ExecDirectoryType t = 0; t < _EXEC_DIRECTORY_TYPE_MAX; t++) {
+                if (!params->prefix[t])
+                        continue;
+
+                if (t != EXEC_DIRECTORY_RUNTIME && context->directories[t].n_items == 0)
+                        continue;
+
+                r = strv_extend(&candidates, params->prefix[t]);
+                if (r < 0)
+                        return r;
+        }
+
+        FOREACH_ARRAY(b, context->bind_mounts, context->n_bind_mounts) {
+                r = strv_extend(&candidates, b->source);
+                if (r < 0)
+                        return r;
+        }
+
+        FOREACH_ARRAY(i, context->mount_images, context->n_mount_images) {
+                r = strv_extend(&candidates, i->source);
+                if (r < 0)
+                        return r;
+        }
+
+        FOREACH_ARRAY(i, context->extension_images, context->n_extension_images) {
+                r = strv_extend(&candidates, i->source);
+                if (r < 0)
+                        return r;
+        }
+
+        STRV_FOREACH(d, context->extension_directories) {
+                /* Might be prefixed with "-" to ignore a missing directory */
+                r = strv_extend(&candidates, *d[0] == '-' ? *d + 1 : *d);
+                if (r < 0)
+                        return r;
+        }
+
+        if (runtime && runtime->shared)
+                FOREACH_ELEMENT(d, ((const char*[]) { runtime->shared->tmp_dir, runtime->shared->var_tmp_dir })) {
+                        if (!*d)
+                                continue;
+
+                        r = strv_extend(&candidates, *d);
+                        if (r < 0)
+                                return r;
+                }
+
+        STRV_FOREACH(c, candidates) {
+                _cleanup_free_ char *d = NULL;
+
+                r = topmost_owned_directory(*c, uid, &d);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to find topmost directory owned by UID " UID_FMT " above '%s', ignoring: %m", uid, *c);
+                        continue;
+                }
+                if (!d)
+                        continue;
+
+                r = strv_consume(&paths, TAKE_PTR(d));
+                if (r < 0)
+                        return r;
+        }
+
+        strv_sort_uniq(paths);
+
+        *ret = TAKE_PTR(paths);
+        return 0;
+}
+
+static int acquire_idmapped_covers(ManagedUserNamespaceSetup *m, int userns_fd) {
+        int r;
+
+        assert(m);
+        assert(userns_fd >= 0);
+
+        /* Ask mountfsd for ID-mapped mounts of the collected directories that map the service manager's
+         * user to the root user of the user namespace. This is best effort: if a file system does not
+         * support ID-mapped mounts, things just remain inaccessible as before. */
+
+        if (!m->mountfsd_link)
+                return 0;
+
+        STRV_FOREACH(path, m->cover_paths) {
+                _cleanup_close_ int mount_fd = -EBADF;
+
+                r = mountfsd_mount_directory_full(m->mountfsd_link, *path, userns_fd, /* flags= */ 0, LOG_DEBUG, &mount_fd);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to acquire ID-mapped mount of '%s', ignoring: %m", *path);
+                        continue;
+                }
+
+                _cleanup_free_ char *p = strdup(*path);
+                if (!p)
+                        return -ENOMEM;
+
+                if (!GREEDY_REALLOC(m->covers, m->n_covers + 1))
+                        return -ENOMEM;
+
+                m->covers[m->n_covers++] = (IdmappedCover) {
+                        .path = TAKE_PTR(p),
+                        .mount_fd = TAKE_FD(mount_fd),
+                };
+
+                log_debug("Acquired ID-mapped mount of '%s'.", *path);
+        }
+
+        return 0;
+}
+
 static int setup_private_users(
-                sd_varlink *nsresource_link, /* may be NULL */
+                ManagedUserNamespaceSetup *managed, /* may be NULL, unless private_users is PRIVATE_USERS_MANAGED */
                 PrivateUsers private_users,
                 uid_t saved_uid,             /* service manager uid */
                 gid_t saved_gid,             /* service manager gid */
@@ -2878,8 +3085,10 @@ static int setup_private_users(
                 if (uid_is_valid(*uid) || uid_is_valid(*gid))
                         return log_debug_errno(SYNTHETIC_ERRNO(EPERM), "When allocating dynamic user namespace range, target UID/GID must be root, refusing.");
 
+                assert(managed);
+
                 _cleanup_close_ int userns_fd = nsresource_allocate_userns(
-                                nsresource_link,
+                                managed->nsresource_link,
                                 /* name= */ NULL,
                                 NSRESOURCE_UIDS_64K);
                 if (userns_fd < 0)
@@ -2896,12 +3105,16 @@ static int setup_private_users(
                         return log_debug_errno(r, "Failed to read outside userns GID range: %m");
 
                 /* Do this before joining the userns: once we changed our identity, polkit will no longer
-                 * consider us the peer that opened the connection to nsresourced. */
+                 * consider us the peer that opened the connections to nsresourced and mountfsd. */
                 if (cgroup_context) {
-                        r = delegate_cgroup_to_managed_userns(nsresource_link, userns_fd, cgroup_context, params);
+                        r = delegate_cgroup_to_managed_userns(managed->nsresource_link, userns_fd, cgroup_context, params);
                         if (r < 0)
                                 return r;
                 }
+
+                r = acquire_idmapped_covers(managed, userns_fd);
+                if (r < 0)
+                        return r;
 
                 if (setns(userns_fd, CLONE_NEWUSER) < 0)
                         return log_debug_errno(errno, "Failed to join freshly allocated user namespace: %m");
@@ -4343,6 +4556,8 @@ static int apply_mount_namespace(
                 int bpffs_socket_fd,
                 int bpffs_errno_pipe,
                 sd_varlink *mountfsd_link, /* may be NULL */
+                const IdmappedCover *idmapped_covers,
+                size_t n_idmapped_covers,
                 char **reterr_path) {
 
         _cleanup_(verity_settings_done) VeritySettings verity = VERITY_SETTINGS_DEFAULT;
@@ -4567,6 +4782,9 @@ static int apply_mount_namespace(
                 .bpffs_errno_pipe = bpffs_errno_pipe,
 
                 .mountfsd_link = mountfsd_link,
+
+                .idmapped_covers = idmapped_covers,
+                .n_idmapped_covers = n_idmapped_covers,
         };
 
         r = setup_namespace(&parameters, reterr_path);
@@ -5235,6 +5453,8 @@ static int setup_delegated_namespaces(
                 int bpffs_socket_fd,
                 int bpffs_errno_pipe,
                 sd_varlink *mountfsd_link, /* may be NULL */
+                const IdmappedCover *idmapped_covers,
+                size_t n_idmapped_covers,
                 int *keep_parent_fd,
                 int *reterr_exit_status) {
 
@@ -5369,6 +5589,8 @@ static int setup_delegated_namespaces(
                                 bpffs_socket_fd,
                                 bpffs_errno_pipe,
                                 mountfsd_link,
+                                idmapped_covers,
+                                n_idmapped_covers,
                                 &error_path);
                 if (r < 0) {
                         *reterr_exit_status = EXIT_NAMESPACE;
@@ -6435,6 +6657,7 @@ int exec_invoke(
         }
 
         _cleanup_(sd_varlink_unrefp) sd_varlink *mountfsd_link = NULL, *nsresource_link = NULL;
+        _cleanup_(managed_user_namespace_setup_done) ManagedUserNamespaceSetup managed = {};
         _cleanup_close_ int keep_parent_fd = -EBADF;
         if (needs_sandboxing &&
             exec_context_get_effective_private_users(context, params) == PRIVATE_USERS_MANAGED) {
@@ -6455,6 +6678,9 @@ int exec_invoke(
                         *exit_status = EXIT_USER;
                         return log_error_errno(r, "Failed to connect to nsresourced: %m");
                 }
+
+                managed.nsresource_link = nsresource_link;
+                managed.mountfsd_link = mountfsd_link;
         }
 
         needs_mount_namespace = exec_needs_mount_namespace(context, params);
@@ -6667,10 +6893,20 @@ int exec_invoke(
                 if (pu == PRIVATE_USERS_NO)
                         pu = PRIVATE_USERS_SELF;
 
+                /* We set up the other namespaces from within the user namespace, hence make sure we can
+                 * still access what we need of the service manager's user's resources from there. */
+                if (pu == PRIVATE_USERS_MANAGED && needs_mount_namespace) {
+                        r = collect_cover_paths(context, params, runtime, saved_uid, &managed.cover_paths);
+                        if (r < 0) {
+                                *exit_status = EXIT_MEMORY;
+                                return log_oom();
+                        }
+                }
+
                 /* The kernel requires /proc/pid/setgroups be set to "deny" prior to writing /proc/pid/gid_map in
                  * unprivileged user namespaces. */
                 r = setup_private_users(
-                                nsresource_link,
+                                &managed,
                                 pu,
                                 saved_uid,
                                 saved_gid,
@@ -6714,6 +6950,8 @@ int exec_invoke(
                         bpffs_socket_fd,
                         bpffs_errno_pipe,
                         mountfsd_link,
+                        managed.covers,
+                        managed.n_covers,
                         &keep_parent_fd,
                         exit_status);
         if (r < 0)
@@ -6769,7 +7007,7 @@ int exec_invoke(
                 PrivateUsers pu = exec_context_get_effective_private_users(context, params);
 
                 r = setup_private_users(
-                                nsresource_link,
+                                &managed,
                                 pu,
                                 saved_uid,
                                 saved_gid,
@@ -6819,12 +7057,16 @@ int exec_invoke(
                         bpffs_socket_fd,
                         bpffs_errno_pipe,
                         mountfsd_link,
+                        managed.covers,
+                        managed.n_covers,
                         &keep_parent_fd,
                         exit_status);
         if (r < 0)
                 return r;
 
         /* We are done now with the nsresourced/mountfsd shenanigans, let's close the connections */
+        managed_user_namespace_setup_done(&managed);
+        managed.nsresource_link = managed.mountfsd_link = NULL;
         nsresource_link = sd_varlink_unref(nsresource_link);
         mountfsd_link = sd_varlink_unref(mountfsd_link);
         /* With PrivatePIDs=, this releases the parent process that set up the connections */

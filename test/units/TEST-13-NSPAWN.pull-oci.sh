@@ -138,6 +138,12 @@ run0 -u testuser --pipe systemd-run -q --unit=fimpel --user -p PrivateUsers=mana
 # namespace, while the unit's cgroup stays with the service manager, which still needs to place ExecStopPost= in it
 run0 -u testuser --pipe systemd-run -q --unit=fimpel-delegate --user -p PrivateUsers=managed -p Delegate=yes -p DelegateSubgroup=payload -p ProtectControlGroups=private -p ExecStopPost=true -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe bash -c '[[ -O /sys/fs/cgroup ]] && mkdir /sys/fs/cgroup/child'
 
+# Mount sources owned by the user below its private directories (here: the runtime directory, which also holds
+# the credentials and PrivateTmp= directories) remain accessible when setting up a managed user namespace
+run0 -u testuser bash -c 'echo fimpel-bind-marker >"$XDG_RUNTIME_DIR/fimpel-bind"'
+run0 -u testuser --pipe systemd-run -q --unit=fimpel-idmapped --user -p PrivateUsers=managed -p PrivateTmp=yes -p SetCredential=fimpel:fimpel-cred-marker -p BindReadOnlyPaths="/run/user/$(id -u testuser)/fimpel-bind:/tmp/fimpel-bind" -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe bash -c 'grep -q fimpel-bind-marker /tmp/fimpel-bind && grep -q fimpel-cred-marker "$CREDENTIALS_DIRECTORY/fimpel"'
+rm "/run/user/$(id -u testuser)/fimpel-bind"
+
 # With PrivatePIDs=yes, the process that calls mountfsd is not the one that connected to it
 test "$(run0 -u testuser --pipe systemd-run -q --unit=fimpel-pidns --user -p PrivateUsers=managed -p PrivatePIDs=yes -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe readlink /proc/self)" = 1
 

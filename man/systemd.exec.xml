@@ -2323,6 +2323,22 @@ BindReadOnlyPaths=/var/lib/systemd</programlisting>
         <varname>PrivateUsers=</varname><option>true</option> with other namespaces will enable use of features not
         normally supported by the per-user instances of the service manager.</para>
 
+        <para>When <literal>managed</literal> is used by a per-user instance of the service manager, the user
+        owning the service manager is not mapped into the unit's user namespace, and hence the unit's processes
+        cannot access its files, such as <varname>$XDG_RUNTIME_DIR</varname> or the home directory. In order to
+        nonetheless be able to set up the configured mounts, the service manager acquires ID-mapped mounts of
+        the directories owned by that user that contain the sources of the mounts, such as the
+        <varname>StateDirectory=</varname>, <varname>BindPaths=</varname>, <varname>MountImages=</varname> or
+        credentials sources, via
+        <citerefentry><refentrytitle>systemd-mountfsd.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+        mapping that user (and the group with the same numeric ID) to <literal>root</literal> of the unit's user
+        namespace. These mounts are only used while setting up the unit's mount namespace and do not appear in
+        it. Directories <command>systemd-mountfsd</command> refuses to provide such mounts for (e.g. on file
+        systems not supporting ID-mapped mounts) remain inaccessible, and since such mounts do not include
+        submounts, this also applies to sources on file systems mounted below them. Since mount destinations
+        are not covered by them, this is mostly useful in combination with <varname>RootDirectory=</varname>,
+        <varname>RootImage=</varname> or <varname>RootMStack=</varname>.</para>
+
         <para>This setting is particularly useful in conjunction with
         <varname>RootDirectory=</varname>/<varname>RootImage=</varname>, as the need to synchronize the user and group
         databases in the root directory and on the host is reduced, as the only users and groups who need to be matched

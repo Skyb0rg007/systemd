@@ -143,6 +143,13 @@ typedef struct MountImage {
         MountImageType type;
 } MountImage;
 
+typedef struct IdmappedCover {
+        char *path;   /* Host directory to cover */
+        int mount_fd; /* Detached, ID-mapped mount of that same directory */
+} IdmappedCover;
+
+void idmapped_cover_free_many(IdmappedCover *o, size_t n);
+
 typedef struct NamespaceParameters {
         RuntimeScope runtime_scope;
 
@@ -223,6 +230,11 @@ typedef struct NamespaceParameters {
         int bpffs_errno_pipe;
 
         sd_varlink *mountfsd_link;
+
+        /* ID-mapped mounts to cover host directories with while setting up the namespace, so that bind
+         * mount sources below them are accessible from a managed user namespace. */
+        const IdmappedCover *idmapped_covers;
+        size_t n_idmapped_covers;
 } NamespaceParameters;
 
 int setup_namespace(const NamespaceParameters *p, char **reterr_path);
