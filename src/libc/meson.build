@@ -8,6 +8,7 @@ libc_wrapper_sources = files(
         'kcmp.c',
         'kexec.c',
         'keyctl.c',
+        'landlock.c',
         'mempolicy.c',
         'mount.c',
         'pidfd.c',
