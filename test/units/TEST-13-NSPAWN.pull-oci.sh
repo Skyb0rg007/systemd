@@ -149,6 +149,13 @@ rm "/run/user/$(id -u testuser)/fimpel-bind"
 # the user namespace, i.e. this checks that it uses the group's ID as seen from outside of it.
 systemd-run -q --wait --pipe --unit=fimpel-devpts-system -p PrivateUsers=managed -p PrivateDevices=yes bash -c 'exec 3<>/dev/ptmx && [[ "$(stat -c %g /dev/pts/0)" == 5 ]]'
 
+# Output of units in user namespaces allocated for the user ends up in the user's journal, if it's split up by user
+if [[ -d /var/log/journal ]]; then
+    run0 -u testuser systemd-run -q --wait --user --unit=fimpel-journal -p PrivateUsers=managed -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack bash -c 'echo fimpel-journal-marker'
+    journalctl --sync
+    run0 -u testuser journalctl --user -q -u fimpel-journal.service --grep=fimpel-journal-marker >/dev/null
+fi
+
 # With PrivatePIDs=yes, the process that calls mountfsd is not the one that connected to it
 test "$(run0 -u testuser --pipe systemd-run -q --unit=fimpel-pidns --user -p PrivateUsers=managed -p PrivatePIDs=yes -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe readlink /proc/self)" = 1
 

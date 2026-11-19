@@ -29,6 +29,7 @@ typedef struct ClientContext {
         char *cgroup;
         char *session;
         uid_t owner_uid;
+        uid_t userns_owner_uid;
 
         char *unit;
         char *user_unit;

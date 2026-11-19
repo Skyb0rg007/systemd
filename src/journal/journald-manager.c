@@ -1083,6 +1083,48 @@ static void manager_write_to_journal(
                 iovec[n++] = IOVEC_MAKE_STRING(k);                      \
         }
 
+uid_t manager_journal_uid_for_context(SplitMode split_mode, const ClientContext *c) {
+        if (!c)
+                return 0;
+
+        switch (split_mode) {
+
+        case SPLIT_UID:
+                if (!uid_is_valid(c->uid))
+                        return 0;
+
+                /* Processes running under a transient UID that belongs to a user namespace systemd-nsresourced
+                 * allocated for a user, and that are part of that user's slice, were started by (or on behalf
+                 * of) that user, who owns everything in that namespace anyway. The UID is not permanently
+                 * assigned to anyone, hence attribute their data to the user rather than storing it in the
+                 * system journal, where the user cannot read it. Require both nsresourced's registry and
+                 * the cgroup to agree, so that neither data that is stale (the cgroup is only re-read
+                 * periodically, and kept if the sender is already gone) nor a namespace placed in a user's
+                 * slice by someone else (e.g. a container started via sudo from the user's session) is
+                 * enough. */
+                if (uid_is_transient(c->uid) &&
+                    uid_is_valid(c->owner_uid) &&
+                    !uid_for_system_journal(c->owner_uid) &&
+                    c->userns_owner_uid == c->owner_uid)
+                        return c->owner_uid;
+
+                /* Split up strictly by (non-root) UID */
+                return c->uid;
+
+        case SPLIT_LOGIN:
+                /* Split up by login UIDs. We do this only if the realuid is not root, in order not to
+                 * accidentally leak privileged information to the user that is logged by a privileged
+                 * process that is part of an unprivileged session. */
+                if (c->uid > 0 && uid_is_valid(c->owner_uid))
+                        return c->owner_uid;
+
+                return 0;
+
+        default:
+                return 0;
+        }
+}
+
 static void manager_dispatch_message_real(
                 Manager *m,
                 struct iovec *iovec, size_t n, size_t mm,
@@ -1193,18 +1235,7 @@ static void manager_dispatch_message_real(
         iovec[n++] = in_initrd() ? IOVEC_MAKE_STRING("_RUNTIME_SCOPE=initrd") : IOVEC_MAKE_STRING("_RUNTIME_SCOPE=system");
         assert(n <= mm);
 
-        if (m->config.split_mode == SPLIT_UID && c && uid_is_valid(c->uid))
-                /* Split up strictly by (non-root) UID */
-                journal_uid = c->uid;
-        else if (m->config.split_mode == SPLIT_LOGIN && c && c->uid > 0 && uid_is_valid(c->owner_uid))
-                /* Split up by login UIDs.  We do this only if the
-                 * realuid is not root, in order not to accidentally
-                 * leak privileged information to the user that is
-                 * logged by a privileged process that is part of an
-                 * unprivileged session. */
-                journal_uid = c->owner_uid;
-        else
-                journal_uid = 0;
+        journal_uid = manager_journal_uid_for_context(m->config.split_mode, c);
 
         /* Get the closest, linearized time we have for this log event from the event loop. (Note that we do
          * not use the source time, and not even the time the event was originally seen, but instead simply
