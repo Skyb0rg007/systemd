@@ -134,6 +134,10 @@ run0 -u testuser systemd-nspawn -q --pipe -M ocicombo /sbin/init | grep luftikus
 
 run0 -u testuser --pipe systemd-run -q --unit=fimpel --user -p PrivateUsers=managed -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe /sbin/init | grep luftikus >/dev/null
 
+# With Delegate=yes, the DelegateSubgroup= cgroup is passed to the user namespace and becomes the root of its cgroup
+# namespace, while the unit's cgroup stays with the service manager, which still needs to place ExecStopPost= in it
+run0 -u testuser --pipe systemd-run -q --unit=fimpel-delegate --user -p PrivateUsers=managed -p Delegate=yes -p DelegateSubgroup=payload -p ProtectControlGroups=private -p ExecStopPost=true -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe bash -c '[[ -O /sys/fs/cgroup ]] && mkdir /sys/fs/cgroup/child'
+
 # With PrivatePIDs=yes, the process that calls mountfsd is not the one that connected to it
 test "$(run0 -u testuser --pipe systemd-run -q --unit=fimpel-pidns --user -p PrivateUsers=managed -p PrivatePIDs=yes -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe readlink /proc/self)" = 1
 

@@ -1493,6 +1493,16 @@ DeviceAllow=/dev/loop-control
           almost always necessary to run the main ("supervising") process of a unit that has delegation
           turned on in a subgroup.</para>
 
+          <para>If <varname>PrivateUsers=</varname><option>managed</option> is used by a service manager
+          without <constant>CAP_SYS_ADMIN</constant> (such as the per-user service manager), the unit's
+          processes run as a transient user the service manager cannot pass ownership to itself. In that case,
+          ownership of the subgroup (but not of the unit's control group) is passed to the root user of the
+          unit's user namespace by
+          <citerefentry><refentrytitle>systemd-nsresourced.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+          and if a cgroup namespace is used (see <varname>ProtectControlGroups=</varname>), the subgroup is the
+          root of it. Without <varname>DelegateSubgroup=</varname>, no control group is passed to such a user
+          namespace.</para>
+
           <xi:include href="version-info.xml" xpointer="v254"/>
         </listitem>
       </varlistentry>
