@@ -3040,8 +3040,29 @@ static int acquire_idmapped_covers(ManagedUserNamespaceSetup *m, int userns_fd) 
         return 0;
 }
 
+static int managed_userns_tty_gid(int userns_fd, gid_t *ret) {
+        _cleanup_(uid_range_freep) UIDRange *inside = NULL, *outside = NULL;
+        int r;
+
+        assert(userns_fd >= 0);
+        assert(ret);
+
+        /* Returns the GID the tty group of the user namespace has outside of it. */
+
+        r = uid_range_load_userns_by_fd_full(userns_fd, GID_RANGE_USERNS_INSIDE, /* coalesce= */ false, &inside);
+        if (r < 0)
+                return r;
+
+        r = uid_range_load_userns_by_fd_full(userns_fd, GID_RANGE_USERNS_OUTSIDE, /* coalesce= */ false, &outside);
+        if (r < 0)
+                return r;
+
+        return uid_range_translate(inside, outside, TTY_GID, ret);
+}
+
 static int setup_private_users(
                 ManagedUserNamespaceSetup *managed, /* may be NULL, unless private_users is PRIVATE_USERS_MANAGED */
+                int managed_userns_fd,       /* if >= 0, the already allocated userns for PRIVATE_USERS_MANAGED */
                 PrivateUsers private_users,
                 uid_t saved_uid,             /* service manager uid */
                 gid_t saved_gid,             /* service manager gid */
@@ -3087,12 +3108,18 @@ static int setup_private_users(
 
                 assert(managed);
 
-                _cleanup_close_ int userns_fd = nsresource_allocate_userns(
-                                managed->nsresource_link,
-                                /* name= */ NULL,
-                                NSRESOURCE_UIDS_64K);
-                if (userns_fd < 0)
-                        return userns_fd;
+                _cleanup_close_ int allocated_userns_fd = -EBADF;
+                int userns_fd = managed_userns_fd;
+                if (userns_fd < 0) {
+                        allocated_userns_fd = nsresource_allocate_userns(
+                                        managed->nsresource_link,
+                                        /* name= */ NULL,
+                                        NSRESOURCE_UIDS_64K);
+                        if (allocated_userns_fd < 0)
+                                return allocated_userns_fd;
+
+                        userns_fd = allocated_userns_fd;
+                }
 
                 _cleanup_(uid_range_freep) UIDRange *uid_range = NULL;
                 r = uid_range_load_userns_by_fd(userns_fd, UID_RANGE_USERNS_OUTSIDE, &uid_range);
@@ -4550,6 +4577,8 @@ static int apply_mount_namespace(
                 const PinnedResource *rootfs,
                 char *const *pressure_path,
                 bool needs_sandboxing,
+                bool userns_joined,
+                gid_t managed_tty_gid,       /* the tty group of the managed userns as seen from outside, if allocated but not joined yet */
                 uid_t exec_directory_uid,
                 gid_t exec_directory_gid,
                 PidRef *bpffs_pidref,
@@ -4776,6 +4805,11 @@ static int apply_mount_namespace(
                 .proc_subset = needs_sandboxing ? context->proc_subset : PROC_SUBSET_ALL,
                 .private_bpf = needs_sandboxing ? context->private_bpf : PRIVATE_BPF_NO,
                 .private_users = needs_sandboxing ? context->private_users : PRIVATE_USERS_NO,
+                /* Units in a managed user namespace are isolated from the host's users, hence give them
+                 * their own devpts instance, whose PTYs belong to the unit's tty group. */
+                .private_devpts = needs_sandboxing && context->private_users == PRIVATE_USERS_MANAGED &&
+                                  (userns_joined || gid_is_valid(managed_tty_gid)),
+                .private_devpts_tty_gid = userns_joined ? TTY_GID : managed_tty_gid,
 
                 .bpffs_pidref = bpffs_pidref,
                 .bpffs_socket_fd = bpffs_socket_fd,
@@ -5449,6 +5483,7 @@ static int setup_delegated_namespaces(
                 const ExecCommand *command,
                 bool needs_sandboxing,
                 bool have_cap_sys_admin,
+                gid_t managed_tty_gid,
                 PidRef *bpffs_pidref,
                 int bpffs_socket_fd,
                 int bpffs_errno_pipe,
@@ -5583,6 +5618,8 @@ static int setup_delegated_namespaces(
                                 rootfs,
                                 pressure_path,
                                 needs_sandboxing,
+                                /* userns_joined= */ delegate || !have_cap_sys_admin,
+                                managed_tty_gid,
                                 uid,
                                 gid,
                                 bpffs_pidref,
@@ -6907,6 +6944,7 @@ int exec_invoke(
                  * unprivileged user namespaces. */
                 r = setup_private_users(
                                 &managed,
+                                /* managed_userns_fd= */ -EBADF,
                                 pu,
                                 saved_uid,
                                 saved_gid,
@@ -6933,6 +6971,31 @@ int exec_invoke(
                 }
         }
 
+        /* If we set up the user namespace only after the other namespaces (see below), and it is a managed one,
+         * allocate it already now, so that the mount namespace can be set up for the IDs it maps: PTYs in our
+         * own devpts instance should belong to the unit's tty group. */
+        _cleanup_close_ int managed_userns_fd = -EBADF;
+        gid_t managed_tty_gid = GID_INVALID;
+        if (needs_sandboxing && !userns_set_up &&
+            context->private_users == PRIVATE_USERS_MANAGED &&
+            !(context->user_namespace_path && runtime->shared && runtime->shared->userns_storage_socket[0] >= 0)) {
+
+                managed_userns_fd = nsresource_allocate_userns(
+                                nsresource_link,
+                                /* name= */ NULL,
+                                NSRESOURCE_UIDS_64K);
+                if (managed_userns_fd < 0) {
+                        *exit_status = EXIT_USER;
+                        return log_error_errno(managed_userns_fd, "Failed to allocate user namespace: %m");
+                }
+
+                r = managed_userns_tty_gid(managed_userns_fd, &managed_tty_gid);
+                if (r < 0) {
+                        *exit_status = EXIT_USER;
+                        return log_error_errno(r, "Failed to determine tty group of allocated user namespace: %m");
+                }
+        }
+
         /* Call setup_delegated_namespaces() the first time to unshare all non-delegated namespaces. */
         r = setup_delegated_namespaces(
                         context,
@@ -6946,6 +7009,7 @@ int exec_invoke(
                         command,
                         needs_sandboxing,
                         have_cap_sys_admin,
+                        managed_tty_gid,
                         &bpffs_pidref,
                         bpffs_socket_fd,
                         bpffs_errno_pipe,
@@ -7008,6 +7072,7 @@ int exec_invoke(
 
                 r = setup_private_users(
                                 &managed,
+                                managed_userns_fd,
                                 pu,
                                 saved_uid,
                                 saved_gid,
@@ -7053,6 +7118,7 @@ int exec_invoke(
                         command,
                         needs_sandboxing,
                         have_cap_sys_admin,
+                        managed_tty_gid,
                         &bpffs_pidref,
                         bpffs_socket_fd,
                         bpffs_errno_pipe,

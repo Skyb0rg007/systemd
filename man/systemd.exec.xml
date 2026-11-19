@@ -2045,6 +2045,11 @@ BindReadOnlyPaths=/var/lib/systemd</programlisting>
         <filename>/dev/mem</filename>, system ports <filename>/dev/port</filename> and others. This is useful
         to turn off physical device access by the executed process. Defaults to false.</para>
 
+        <para>The pseudo TTY subsystem is shared with the host, unless
+        <varname>PrivateUsers=</varname><option>managed</option> is used, in which case a new
+        <filename>/dev/pts/</filename> instance is mounted for the unit, whose pseudo TTYs belong to the
+        <literal>tty</literal> group of the unit's user namespace.</para>
+
         <para>Enabling this option will install a system call filter to block low-level I/O system calls that
         are grouped in the <varname>@raw-io</varname> set, remove <constant>CAP_MKNOD</constant> and
         <constant>CAP_SYS_RAWIO</constant> from the capability bounding set for the unit, and set
