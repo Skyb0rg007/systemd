@@ -2601,6 +2601,33 @@ static bool namespace_read_only(const NamespaceParameters *p) {
                 strv_isempty(p->read_write_paths);
 }
 
+static void attach_idmapped_covers(const NamespaceParameters *p) {
+        assert(p);
+
+        /* Like acquiring them, this is best effort: without them, the bind mount sources below them remain
+         * inaccessible, which will be reported when they're mounted, if they are needed at all. */
+
+        FOREACH_ARRAY(o, p->idmapped_covers, p->n_idmapped_covers) {
+                if (move_mount(o->mount_fd, "", AT_FDCWD, o->path, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+                        log_debug_errno(errno, "Failed to attach ID-mapped mount to '%s', ignoring: %m", o->path);
+                        continue;
+                }
+
+                log_debug("Covered '%s' with ID-mapped mount.", o->path);
+        }
+}
+
+void idmapped_cover_free_many(IdmappedCover *o, size_t n) {
+        assert(o || n == 0);
+
+        FOREACH_ARRAY(i, o, n) {
+                free(i->path);
+                safe_close(i->mount_fd);
+        }
+
+        free(o);
+}
+
 int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
 
         _cleanup_(loop_device_unrefp) LoopDevice *loop_device = NULL;
@@ -3123,22 +3150,19 @@ int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
                 return r;
         }
 
-        /* Create the source directory to allow runtime propagation of mounts */
-        if (setup_propagate)
-                (void) mkdir_p(p->propagate_dir, 0600);
-
-        if (p->n_extension_images > 0 || !strv_isempty(p->extension_directories)) {
-                /* ExtensionImages/Directories mountpoint directories will be created while parsing the
-                 * mounts to create, so have the parent ready */
-                char *extension_dir = strjoina(p->private_namespace_dir, "/unit-extensions");
-                (void) mkdir_p(extension_dir, 0600);
-        }
-
         /* Remount / as SLAVE so that nothing now mounted in the namespace
          * shows up in the parent */
         r = mount_nofollow_verbose(LOG_DEBUG, /* what= */ NULL, "/", /* fstype= */ NULL, MS_SLAVE|MS_REC, /* options= */ NULL);
         if (r < 0)
                 return r;
+
+        /* Cover host directories with their ID-mapped counterparts, so that the bind mount sources below
+         * them become accessible to us. If the root directory is used in place, do this before setting it
+         * up, so that it ends up on top of a covering mount of one of its parents rather than being hidden
+         * by it. Otherwise do it after, so that they do not end up in it, see below. */
+        bool root_in_place = p->rootfs && p->rootfs->directory;
+        if (root_in_place)
+                attach_idmapped_covers(p);
 
         if (root_mount_fd >= 0) {
                 /* If we have root_mount_fd we have a ready-to-use detached mount. Attach it. */
@@ -3204,6 +3228,22 @@ int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
                 r = mount_nofollow_verbose(LOG_DEBUG, "/", root, /* fstype= */ NULL, MS_BIND|MS_REC, /* options= */ NULL);
                 if (r < 0)
                         return r;
+        }
+
+        /* When the host's root directory is used, it was bind mounted to 'root' recursively by now, so the
+         * covering mounts do not end up in it. For images, they are outside of it anyway. */
+        if (!root_in_place)
+                attach_idmapped_covers(p);
+
+        /* Create the source directory to allow runtime propagation of mounts */
+        if (setup_propagate)
+                (void) mkdir_p(p->propagate_dir, 0600);
+
+        if (p->n_extension_images > 0 || !strv_isempty(p->extension_directories)) {
+                /* ExtensionImages/Directories mountpoint directories will be created while parsing the
+                 * mounts to create, so have the parent ready */
+                char *extension_dir = strjoina(p->private_namespace_dir, "/unit-extensions");
+                (void) mkdir_p(extension_dir, 0600);
         }
 
         /* Try to set up the new root directory before mounting anything else there. */

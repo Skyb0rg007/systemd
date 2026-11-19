@@ -134,6 +134,12 @@ run0 -u testuser systemd-nspawn -q --pipe -M ocicombo /sbin/init | grep luftikus
 
 run0 -u testuser --pipe systemd-run -q --unit=fimpel --user -p PrivateUsers=managed -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe /sbin/init | grep luftikus >/dev/null
 
+# Mount sources owned by the user below its private directories (here: the runtime directory, which also holds
+# the credentials and PrivateTmp= directories) remain accessible when setting up a managed user namespace
+run0 -u testuser bash -c 'echo fimpel-bind-marker >"$XDG_RUNTIME_DIR/fimpel-bind"'
+run0 -u testuser --pipe systemd-run -q --unit=fimpel-idmapped --user -p PrivateUsers=managed -p PrivateTmp=yes -p SetCredential=fimpel:fimpel-cred-marker -p BindReadOnlyPaths="/run/user/$(id -u testuser)/fimpel-bind:/tmp/fimpel-bind" -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe bash -c 'grep -q fimpel-bind-marker /tmp/fimpel-bind && grep -q fimpel-cred-marker "$CREDENTIALS_DIRECTORY/fimpel"'
+rm "/run/user/$(id -u testuser)/fimpel-bind"
+
 # With PrivatePIDs=yes, the process that calls mountfsd is not the one that connected to it
 test "$(run0 -u testuser --pipe systemd-run -q --unit=fimpel-pidns --user -p PrivateUsers=managed -p PrivatePIDs=yes -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe readlink /proc/self)" = 1
 
