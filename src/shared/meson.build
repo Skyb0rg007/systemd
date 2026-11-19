@@ -124,6 +124,7 @@ shared_sources = files(
         'kernel-image.c',
         'killall.c',
         'label-util.c',
+        'landlock-util.c',
         'libarchive-util.c',
         'libaudit-util.c',
         'libcrypt-util.c',

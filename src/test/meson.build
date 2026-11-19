@@ -151,6 +151,7 @@ simple_tests += files(
         'test-kbd-util.c',
         'test-keyring-util.c',
         'test-label.c',
+        'test-landlock-util.c',
         'test-limits-util.c',
         'test-list.c',
         'test-local-addresses.c',
