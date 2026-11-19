@@ -15,6 +15,7 @@
 #include "bitfield.h"
 #include "capability-list.h"
 #include "capability-util.h"
+#include "cgroup.h"
 #include "cgroup-setup.h"
 #include "coredump-util.h"
 #include "cpu-set-util.h"
@@ -420,7 +421,8 @@ int exec_params_get_cgroup_path(
          * this is not necessary, the cgroup is still empty. We distinguish these cases with the EXEC_CONTROL_CGROUP
          * flag, which is only passed for the former statements, not for the latter. */
 
-        /* Keep this in sync with exec_params_needs_control_subcgroup(). */
+        /* Keep this in sync with exec_params_needs_control_subcgroup() and
+         * exec_delegates_cgroup_to_managed_userns(). */
         if (FLAGS_SET(params->flags, EXEC_CGROUP_DELEGATE) && (FLAGS_SET(params->flags, EXEC_CONTROL_CGROUP) || c->delegate_subgroup)) {
                 if (FLAGS_SET(params->flags, EXEC_IS_CONTROL))
                         subgroup = ".control";
@@ -437,6 +439,36 @@ int exec_params_get_cgroup_path(
 
         *ret = p;
         return !!subgroup;
+}
+
+bool exec_delegates_cgroup_to_managed_userns(
+                const ExecCommand *command,
+                const ExecContext *context,
+                const CGroupContext *cgroup_context,
+                const ExecParameters *params) {
+
+        assert(command);
+        assert(context);
+        assert(cgroup_context);
+        assert(params);
+
+        /* With PrivateUsers=managed, the unit's root user is a transient UID that is only known once the
+         * user namespace is allocated, and that an unprivileged service manager could not chown() the cgroup
+         * to anyway, hence we ask nsresourced to pass ownership of the DelegateSubgroup= cgroup to the user
+         * namespace instead. Only the subgroup is passed on, like nspawn does for its payload cgroup, as the
+         * unit's cgroup has to stay ours, so that we can still create ".control" in it and clean it up.
+         * Control processes run in their own user namespace each, and must not take the cgroup away from
+         * the main process.
+         *
+         * The subgroup checked for here is the one exec_params_get_cgroup_path() picks for the main process,
+         * keep this in sync with it. */
+        return FLAGS_SET(params->flags, EXEC_APPLY_SANDBOXING) &&
+                !FLAGS_SET(command->flags, EXEC_COMMAND_FULLY_PRIVILEGED) &&
+                params->cgroup_path &&
+                FLAGS_SET(params->flags, EXEC_CGROUP_DELEGATE) &&
+                !FLAGS_SET(params->flags, EXEC_IS_CONTROL) &&
+                cgroup_context->delegate_subgroup &&
+                context->private_users == PRIVATE_USERS_MANAGED;
 }
 
 bool exec_context_get_cpu_affinity_from_numa(const ExecContext *c) {
@@ -523,6 +555,12 @@ int exec_spawn(
         /* We won't know the real executable path until we create the mount namespace in the child, but we
            want to log from the parent, so we use the possibly inaccurate path here. */
         log_command_line(unit, "About to execute", command->path, command->argv);
+
+        /* If the main process shall pass its subgroup to a managed user namespace, a previous main process
+         * of this unit might have been given the subgroup already. Remove it, so that the new process gets a
+         * fresh one. If that fails, the executor will refuse to use the subgroup. */
+        if (exec_delegates_cgroup_to_managed_userns(command, context, cgroup_context, params))
+                (void) unit_remove_stale_delegated_subcgroup(unit, cgroup_context->delegate_subgroup);
 
         /* We cannot spawn the main service process into the subcgroup as it might need to unshare the cgroup
          * namespace first if one is configured to make sure the root of the cgroup namespace is the service

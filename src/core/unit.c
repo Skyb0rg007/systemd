@@ -4400,6 +4400,10 @@ static int unit_verify_contexts(const Unit *u) {
         if ((ec->user || ec->dynamic_user || ec->group || ec->pam_name) && ec->private_users == PRIVATE_USERS_MANAGED)
                 return log_unit_error_errno(u, SYNTHETIC_ERRNO(ENOEXEC), "PrivateUsers=managed may not be used in combination with User=/DynamicUser=/Group=/PAMName=. Refusing.");
 
+        const CGroupContext *cc = unit_get_cgroup_context(u);
+        if (ec->private_users == PRIVATE_USERS_MANAGED && UNIT_VTABLE(u)->can_delegate && cc && cc->delegate && !cc->delegate_subgroup)
+                log_unit_warning(u, "Delegate= is enabled with PrivateUsers=managed, but DelegateSubgroup= is not set, hence no control group will be delegated to the unit's user namespace.");
+
         if (ec->user_namespace_path && ec->private_users != PRIVATE_USERS_NO)
                 return log_unit_error_errno(u, SYNTHETIC_ERRNO(ENOEXEC), "PrivateUsers= may not be used with custom UserNamespacePath=. Refusing.");
 

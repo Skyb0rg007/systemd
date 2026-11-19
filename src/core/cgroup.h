@@ -426,6 +426,7 @@ int unit_get_cgroup_path_with_fallback(const Unit *u, char **ret);
 
 int unit_realize_cgroup(Unit *u);
 void unit_prune_cgroup(Unit *u);
+int unit_remove_stale_delegated_subcgroup(Unit *u, const char *subgroup);
 void unit_add_to_cgroup_realize_queue(Unit *u);
 
 int unit_cgroup_is_empty(Unit *u);

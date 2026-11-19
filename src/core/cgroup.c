@@ -2786,8 +2786,9 @@ static bool unit_maybe_release_cgroup(Unit *u) {
         return false;
 }
 
-static int unit_prune_cgroup_via_bus(Unit *u) {
+static int unit_remove_cgroup_via_bus(Unit *u, const char *subgroup /* may be NULL */) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        _cleanup_free_ char *j = NULL;
         int r;
 
         assert(u);
@@ -2810,6 +2811,14 @@ static int unit_prune_cgroup_via_bus(Unit *u) {
                         PATH_STARTSWITH_RETURN_LEADING_SLASH|PATH_STARTSWITH_REFUSE_DOT_DOT);
         if (!pp)
                 return -EINVAL;
+
+        if (subgroup) {
+                j = path_join(pp, subgroup);
+                if (!j)
+                        return -ENOMEM;
+
+                pp = j;
+        }
 
         r = bus_call_method(u->manager->system_bus,
                             bus_systemd_mgr,
@@ -2857,7 +2866,7 @@ void unit_prune_cgroup(Unit *u) {
 
         r = cg_trim(crt->cgroup_path, !is_root_slice);
         if (r < 0) {
-                int k = unit_prune_cgroup_via_bus(u);
+                int k = unit_remove_cgroup_via_bus(u, /* subgroup= */ NULL);
 
                 if (k >= 0)
                         log_unit_debug_errno(u, r, "Failed to destroy cgroup %s on our own (%m), but worked when talking to PID 1.", empty_to_root(crt->cgroup_path));
@@ -2885,6 +2894,63 @@ void unit_prune_cgroup(Unit *u) {
         crt->cgroup_enabled_mask = 0;
 
         crt->bpf_device_control_installed = bpf_program_free(crt->bpf_device_control_installed);
+}
+
+int unit_remove_stale_delegated_subcgroup(Unit *u, const char *subgroup) {
+        _cleanup_close_ int fd = -EBADF;
+        _cleanup_free_ char *p = NULL;
+        struct stat st;
+        int r;
+
+        assert(u);
+        assert(subgroup);
+
+        /* Removes a delegated subgroup that a previous process of this unit left behind, if no processes
+         * run in it anymore. This is used before spawning a main process that will pass the subgroup to its
+         * managed user namespace: a previous process might have been given the subgroup already, and
+         * systemd-nsresourced only removes it once that process' user namespace is released, which happens
+         * asynchronously. Until then the subgroup is owned by the transient UID of that user namespace, and
+         * can't be passed on again. Returns > 0 if the subgroup was removed. */
+
+        CGroupRuntime *crt = unit_get_cgroup_runtime(u);
+        if (!crt || !crt->cgroup_path)
+                return 0;
+
+        p = path_join(crt->cgroup_path, subgroup);
+        if (!p)
+                return -ENOMEM;
+
+        fd = cg_path_open(p);
+        if (fd == -ENOENT)
+                return 0;
+        if (fd < 0)
+                return log_unit_debug_errno(u, fd, "Failed to open cgroup '%s': %m", p);
+
+        if (fstat(fd, &st) < 0)
+                return log_unit_debug_errno(u, errno, "Failed to stat cgroup '%s': %m", p);
+        if (st.st_uid == geteuid())
+                return 0; /* Still ours, can be passed on as is */
+
+        fd = safe_close(fd);
+
+        r = cg_is_empty(p);
+        if (r < 0)
+                return log_unit_debug_errno(u, r, "Failed to determine whether cgroup '%s' is empty: %m", p);
+        if (r == 0)
+                return log_unit_debug_errno(u, SYNTHETIC_ERRNO(EBUSY),
+                                            "Cgroup '%s' is still populated, not removing it.", p);
+
+        r = unit_remove_subcgroup(u, subgroup);
+        if (r < 0) {
+                /* The previous process might have created cgroups below the subgroup, which we can't
+                 * remove if we're unprivileged. Ask the system service manager to do it for us then. */
+                int k = unit_remove_cgroup_via_bus(u, subgroup);
+                if (k < 0)
+                        return log_unit_debug_errno(u, r, "Failed to remove stale delegated cgroup '%s': %m", p);
+        }
+
+        log_unit_debug(u, "Removed stale delegated cgroup '%s'.", p);
+        return 1;
 }
 
 int unit_search_main_pid(Unit *u, PidRef *ret) {

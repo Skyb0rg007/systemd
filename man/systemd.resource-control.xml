@@ -1433,7 +1433,8 @@ DeviceAllow=/dev/loop-control
           where this is enabled may create and manage their own private subhierarchy of control groups below
           the control group of the unit itself. For unprivileged services (i.e. those using the
           <varname>User=</varname> setting) the unit's control group will be made accessible to the relevant
-          user.</para>
+          user. For units using <varname>PrivateUsers=</varname><option>managed</option>, see
+          <varname>DelegateSubgroup=</varname> below.</para>
 
           <para>When enabled the service manager will refrain from manipulating control groups or moving
           processes below the unit's control group, so that a clear concept of ownership is established: the
@@ -1492,6 +1493,18 @@ DeviceAllow=/dev/loop-control
           has been started. Since no processes should live in inner nodes of the control group tree it is
           almost always necessary to run the main ("supervising") process of a unit that has delegation
           turned on in a subgroup.</para>
+
+          <para>If <varname>PrivateUsers=</varname><option>managed</option> is used (see
+          <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>),
+          the unit's processes run as a transient user that is only known once its user namespace is
+          allocated. In that case, ownership of the subgroup (but not of the unit's control group) is passed
+          to the root user of the main process' user namespace by
+          <citerefentry><refentrytitle>systemd-nsresourced.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+          and if a cgroup namespace is used (see <varname>ProtectControlGroups=</varname>), the subgroup is the
+          root of it. Each main process (e.g. each <varname>ExecStart=</varname> command of a
+          <varname>Type=</varname><option>oneshot</option> service) gets a newly created subgroup, hence it
+          fails to start if processes of a previous one are still running in the subgroup. Without
+          <varname>DelegateSubgroup=</varname>, no control group is passed to such a user namespace.</para>
 
           <xi:include href="version-info.xml" xpointer="v254"/>
         </listitem>

@@ -2785,6 +2785,27 @@ static int setup_private_users_child(int unshare_ready_fd, const char *uid_map, 
         return 0;
 }
 
+static int delegate_cgroup_to_managed_userns(sd_varlink *nsresource_link, int userns_fd, int cgroup_fd) {
+        int r;
+
+        assert(nsresource_link);
+        assert(userns_fd >= 0);
+        assert(cgroup_fd >= 0);
+
+        /* See exec_delegates_cgroup_to_managed_userns(). We're already in the subgroup, and checked that
+         * it's ours before moving into it. */
+
+        r = nsresource_add_cgroup(nsresource_link, userns_fd, cgroup_fd);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to delegate cgroup to user namespace: %m");
+        if (r == 0)
+                return log_debug_errno(SYNTHETIC_ERRNO(ESTALE),
+                                       "Freshly allocated user namespace is not registered with systemd-nsresourced, refusing.");
+
+        log_debug("Delegated cgroup to managed user namespace.");
+        return 1;
+}
+
 static int setup_private_users(
                 sd_varlink *nsresource_link, /* may be NULL */
                 PrivateUsers private_users,
@@ -2794,7 +2815,8 @@ static int setup_private_users(
                 gid_t *gid,                  /* unit gid (ditto)            [input+output] */
                 uid_t *outside_uid,          /* uid seen from the outside (which is the same as *uid, except of userns is used) */
                 gid_t *outside_gid,          /* gid seen from the outside (similar) */
-                bool allow_setgroups) {
+                bool allow_setgroups,
+                int delegate_cgroup_fd) {    /* if >= 0, cgroup to pass to the userns in managed mode */
 
         _cleanup_free_ char *uid_map = NULL, *gid_map = NULL;
         _cleanup_close_pair_ int errno_pipe[2] = EBADF_PAIR;
@@ -2844,6 +2866,14 @@ static int setup_private_users(
                 r = uid_range_load_userns_by_fd(userns_fd, GID_RANGE_USERNS_OUTSIDE, &gid_range);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to read outside userns GID range: %m");
+
+                /* Do this before joining the userns: once we changed our identity, polkit will no longer
+                 * consider us the peer that opened the connection to nsresourced. */
+                if (delegate_cgroup_fd >= 0) {
+                        r = delegate_cgroup_to_managed_userns(nsresource_link, userns_fd, delegate_cgroup_fd);
+                        if (r < 0)
+                                return r;
+                }
 
                 if (setns(userns_fd, CLONE_NEWUSER) < 0)
                         return log_debug_errno(errno, "Failed to join freshly allocated user namespace: %m");
@@ -5629,6 +5659,8 @@ int exec_invoke(
                 needs_mount_namespace,  /* Do we need to set up a mount namespace for this kernel? */
                 have_cap_sys_admin,
                 userns_set_up = false,
+                delegate_cgroup_to_userns,
+                attach_to_subcgroup_early,
                 keep_seccomp_privileges = false;
 #if HAVE_SELINUX
         _cleanup_free_ char *mac_selinux_context_net = NULL;
@@ -5652,6 +5684,7 @@ int exec_invoke(
         int ngids = 0, ngids_after_pam = 0;
         int named_iofds[3] = EBADF_TRIPLET;
         _cleanup_close_ int socket_fd = -EBADF, broker_fd = -EBADF, bpffs_socket_fd = -EBADF, bpffs_errno_pipe = -EBADF;
+        _cleanup_close_ int delegate_cgroup_fd = -EBADF;
         _cleanup_(pidref_done_sigkill_wait) PidRef bpffs_pidref = PIDREF_NULL;
 
         assert(command);
@@ -5973,6 +6006,17 @@ int exec_invoke(
          * from it. */
         needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & EXEC_COMMAND_FULLY_PRIVILEGED);
 
+        /* If true, we'll move into the subgroup right away, and give it to the user namespace before joining
+         * it. */
+        delegate_cgroup_to_userns = exec_delegates_cgroup_to_managed_userns(command, context, cgroup_context, params);
+        assert(!delegate_cgroup_to_userns || needs_sandboxing);
+
+        /* Once we joined a managed user namespace we lack the privileges to move ourselves into another
+         * cgroup, hence move into the subgroup right away in that case. */
+        attach_to_subcgroup_early = needs_sandboxing &&
+                exec_context_get_effective_private_users(context, params) == PRIVATE_USERS_MANAGED;
+        assert(!delegate_cgroup_to_userns || attach_to_subcgroup_early);
+
         /* Journald will try to look-up our cgroup in order to populate _SYSTEMD_CGROUP and _SYSTEMD_UNIT fields.
          * Hence we need to migrate to the target cgroup from init.scope before connecting to journald */
         if (params->cgroup_path) {
@@ -5997,12 +6041,45 @@ int exec_invoke(
                  * namespace and we want the root of the namespace to be the main service cgroup and not the
                  * subgroup. One edge case is if we're a control process that needs to be spawned in a
                  * subgroup, in this case, we have no choice as moving into the main service cgroup might
-                 * violate the no inner processes rule of cgroupv2. */
+                 * violate the no inner processes rule of cgroupv2. The other is if we use a managed user
+                 * namespace: once we joined it, we couldn't move ourselves into the subgroup anymore, hence
+                 * the subgroup becomes the root of the cgroup namespace. */
                 const char *cgtarget = needs_sandboxing && exec_needs_cgroup_namespace(context) &&
-                                                           !exec_params_needs_control_subcgroup(params)
+                                                           !exec_params_needs_control_subcgroup(params) &&
+                                                           !attach_to_subcgroup_early
                                                            ? params->cgroup_path : subcgroup;
 
-                r = cg_attach(cgtarget, /* pid= */ 0);
+                if (delegate_cgroup_to_userns) {
+                        struct stat st;
+
+                        /* Pin the subgroup to delegate now, as it might not be reachable by its path anymore
+                         * once the mount and cgroup namespaces are set up, which may happen before the user
+                         * namespace is allocated. */
+                        delegate_cgroup_fd = cg_path_open(subcgroup);
+                        if (delegate_cgroup_fd < 0) {
+                                *exit_status = EXIT_CGROUP;
+                                return log_error_errno(delegate_cgroup_fd, "Failed to open cgroup '%s': %m", subcgroup);
+                        }
+
+                        /* The manager removes a subgroup left behind by a previous process of this unit
+                         * before spawning us, unless processes still run in it. Check before moving into it,
+                         * so that we don't end up in a cgroup that somebody else controls. */
+                        if (fstat(delegate_cgroup_fd, &st) < 0) {
+                                *exit_status = EXIT_CGROUP;
+                                return log_error_errno(errno, "Failed to stat cgroup '%s': %m", subcgroup);
+                        }
+                        if (st.st_uid != geteuid()) {
+                                *exit_status = EXIT_CGROUP;
+                                return log_error_errno(SYNTHETIC_ERRNO(EBUSY),
+                                                       "Cgroup '%s' is owned by UID " UID_FMT ", likely still by processes of a previous invocation of this unit, refusing.",
+                                                       subcgroup, st.st_uid);
+                        }
+
+                        r = cg_fd_attach(delegate_cgroup_fd, /* pid= */ 0);
+                        if (r == -EOPNOTSUPP && cg_is_threaded(subcgroup) > 0)
+                                r = -EUCLEAN;
+                } else
+                        r = cg_attach(cgtarget, /* pid= */ 0);
                 if (r == -EUCLEAN) {
                         *exit_status = EXIT_CGROUP;
                         return log_error_errno(r,
@@ -6577,7 +6654,8 @@ int exec_invoke(
                                 &gid,
                                 &outside_uid,
                                 &outside_gid,
-                                /* allow_setgroups= */ false);
+                                /* allow_setgroups= */ false,
+                                delegate_cgroup_fd);
                 /* If it was requested explicitly and we can't set it up, fail early. Otherwise, continue and let
                  * the actual requested operations fail (or silently continue). */
                 if (r < 0) {
@@ -6674,7 +6752,8 @@ int exec_invoke(
                                 &gid,
                                 &outside_uid,
                                 &outside_gid,
-                                /* allow_setgroups= */ pu == PRIVATE_USERS_FULL);
+                                /* allow_setgroups= */ pu == PRIVATE_USERS_FULL,
+                                delegate_cgroup_fd);
                 if (r < 0) {
                         *exit_status = EXIT_USER;
                         return log_error_errno(r, "Failed to set up user namespacing: %m");
@@ -6682,6 +6761,9 @@ int exec_invoke(
                 if (r > 0)
                         log_debug("Set up privileged user namespace");
         }
+
+        /* The user namespace is set up now, so the cgroup was delegated to it, if at all. */
+        delegate_cgroup_fd = safe_close(delegate_cgroup_fd);
 
         if (params->user_lookup_fd >= 0) {
                 /* If we haven't sent the UIDs/GIDs we settled on upstream yet, let's do so now, as we
@@ -6733,10 +6815,11 @@ int exec_invoke(
         bpffs_socket_fd = safe_close(bpffs_socket_fd);
         bpffs_errno_pipe = safe_close(bpffs_errno_pipe);
 
-        if (needs_sandboxing && exec_needs_cgroup_namespace(context) && params->cgroup_path) {
+        if (needs_sandboxing && exec_needs_cgroup_namespace(context) && params->cgroup_path && !attach_to_subcgroup_early) {
                 /* Move ourselves into the subcgroup now *after* we've unshared the cgroup namespace, which
                  * ensures the root of the cgroup namespace is the top level service cgroup and not the
-                 * subcgroup. Adjust the prefix accordingly since we're in a cgroup namespace now. */
+                 * subcgroup. Adjust the prefix accordingly since we're in a cgroup namespace now. With a
+                 * managed user namespace, we moved into it earlier already, see above. */
                 r = attach_to_subcgroup(context, cgroup_context, params, /* prefix= */ NULL);
                 if (r < 0) {
                         *exit_status = EXIT_CGROUP;
