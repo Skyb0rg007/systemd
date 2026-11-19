@@ -8,6 +8,7 @@
 #include <linux/seccomp.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/personality.h>
 #include <sys/prctl.h> /* IWYU pragma: keep */
 #include <sys/ptrace.h>
@@ -1377,6 +1378,131 @@ int seccomp_parse_syscall_filter(
         return 0;
 }
 
+static int seccomp_add_mount_namespace_rules(scmp_filter_ctx seccomp) {
+        unsigned flag;
+        int id, r;
+
+        assert(seccomp);
+
+        /* open_tree() and open_tree_attr() create an anonymous mount namespace with OPEN_TREE_CLONE, and a
+         * regular one with OPEN_TREE_NAMESPACE. fsmount() always creates a mount namespace, an anonymous one
+         * or with FSMOUNT_NAMESPACE a regular one. Mounts in an anonymous mount namespace can be attached to
+         * the current mount namespace with move_mount(), which would allow circumventing the restriction. */
+
+        FOREACH_STRING(name, "open_tree", "open_tree_attr") {
+                id = sym_seccomp_syscall_resolve_name(name);
+                if (id == __NR_SCMP_ERROR) {
+                        log_debug("System call %s() is not known, not blocking it.", name);
+                        continue;
+                }
+
+                FOREACH_ARGUMENT(flag, OPEN_TREE_CLONE, OPEN_TREE_NAMESPACE) {
+                        r = sym_seccomp_rule_add_exact(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPERM),
+                                        id,
+                                        1,
+                                        SCMP_A2(SCMP_CMP_MASKED_EQ, flag, flag));
+                        if (r == -EDOM) /* Not available on this architecture */
+                                break;
+                        if (r < 0)
+                                return log_debug_errno(r, "Failed to add %s() rule: %m", name);
+                }
+        }
+
+        id = sym_seccomp_syscall_resolve_name("fsmount");
+        if (id == __NR_SCMP_ERROR) {
+                log_debug("System call fsmount() is not known, not blocking it.");
+                return 0;
+        }
+
+        r = sym_seccomp_rule_add_exact(seccomp, SCMP_ACT_ERRNO(EPERM), id, /* arg_cnt= */ 0);
+        if (r < 0 && r != -EDOM)
+                return log_debug_errno(r, "Failed to add fsmount() rule: %m");
+
+        return 0;
+}
+
+static bool seccomp_arch_has_64bit_args(uint32_t arch) {
+        /* libseccomp silently truncates comparison values to 32 bits on architectures with 32-bit system
+         * call arguments, which would turn rules matching the upper 32 bits into rules matching anything. */
+        switch (arch) {
+        case SCMP_ARCH_X86_64:
+        case SCMP_ARCH_AARCH64:
+#ifdef SCMP_ARCH_LOONGARCH64
+        case SCMP_ARCH_LOONGARCH64:
+#endif
+        case SCMP_ARCH_MIPS64:
+        case SCMP_ARCH_MIPSEL64:
+        case SCMP_ARCH_PARISC64:
+        case SCMP_ARCH_PPC64:
+        case SCMP_ARCH_PPC64LE:
+#ifdef SCMP_ARCH_RISCV64
+        case SCMP_ARCH_RISCV64:
+#endif
+        case SCMP_ARCH_S390X:
+                return true;
+        default:
+                return false;
+        }
+}
+
+/* The flags unshare() accepts that do not create namespaces. */
+#define UNSHARE_NON_NAMESPACE_FLAGS (CLONE_THREAD|CLONE_FS|CLONE_SIGHAND|CLONE_VM|CLONE_FILES|CLONE_SYSVSEM)
+
+static int seccomp_add_unknown_namespace_rules(scmp_filter_ctx seccomp, uint32_t arch, unsigned long retain) {
+        int r;
+
+        assert(seccomp);
+
+        /* Any restriction also prohibits namespace types we do not know about. New namespace types can
+         * only be requested via unshare(), setns() and clone3(): all bits of the flags parameter of clone()
+         * are allocated already, and clone3() is blocked altogether. Hence block every flag that unshare()
+         * or setns() might interpret as a namespace type in the future, i.e. every flag except those of
+         * known namespace types and those unshare() accepts for other purposes. */
+
+        for (unsigned i = 0; i < 32; i++) {
+                uint32_t f = UINT32_C(1) << i;
+
+                if (!(f & (NAMESPACE_FLAGS_ALL|UNSHARE_NON_NAMESPACE_FLAGS))) {
+                        r = sym_seccomp_rule_add_exact(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPERM),
+                                        SCMP_SYS(unshare),
+                                        1,
+                                        SCMP_A0(SCMP_CMP_MASKED_EQ, f, f));
+                        if (r < 0)
+                                return log_debug_errno(r, "Failed to add unshare() rule: %m");
+                }
+
+                /* If no namespace type is retained, setns() is blocked altogether already. The kernel
+                 * takes nstype as an int, hence only the lower 32 bits matter. */
+                if ((retain & NAMESPACE_FLAGS_ALL) != 0 && !(f & NAMESPACE_FLAGS_ALL)) {
+                        r = sym_seccomp_rule_add_exact(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPERM),
+                                        SCMP_SYS(setns),
+                                        1,
+                                        SCMP_A1(SCMP_CMP_MASKED_EQ, f, f));
+                        if (r < 0)
+                                return log_debug_errno(r, "Failed to add setns() rule: %m");
+                }
+        }
+
+        if (seccomp_arch_has_64bit_args(arch)) {
+                r = sym_seccomp_rule_add_exact(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(unshare),
+                                1,
+                                SCMP_A0(SCMP_CMP_GE, UINT64_C(1) << 32));
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to add unshare() rule: %m");
+        }
+
+        return 0;
+}
+
 int seccomp_restrict_namespaces(unsigned long retain) {
         uint32_t arch;
         int r;
@@ -1505,6 +1631,22 @@ int seccomp_restrict_namespaces(unsigned long retain) {
                 }
                 if (r < 0)
                         continue;
+
+                if (!FLAGS_SET(retain, CLONE_NEWNS)) {
+                        r = seccomp_add_mount_namespace_rules(seccomp);
+                        if (r < 0) {
+                                log_debug_errno(r, "Failed to add mount API rules for architecture %s, skipping: %m",
+                                                seccomp_arch_to_string(arch));
+                                continue;
+                        }
+                }
+
+                r = seccomp_add_unknown_namespace_rules(seccomp, arch, retain);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to add rules for unknown namespace types for architecture %s, skipping: %m",
+                                        seccomp_arch_to_string(arch));
+                        continue;
+                }
 
                 r = sym_seccomp_load(seccomp);
                 if (ERRNO_IS_NEG_SECCOMP_FATAL(r))

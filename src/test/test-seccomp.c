@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/personality.h>
 #include <sys/ptrace.h>
 #include <sys/shm.h>
@@ -375,6 +376,31 @@ TEST(restrict_namespace) {
                 ASSERT_ERROR_ERRNO(raw_clone(CLONE_NEWUTS), EPERM);
                 ASSERT_ERROR_ERRNO(raw_clone(CLONE_NEWIPC), EPERM);
                 ASSERT_ERROR_ERRNO(raw_clone(CLONE_NEWNET|CLONE_NEWUTS), EPERM);
+
+                /* Flags that might denote namespace types unknown to us are blocked (the kernel currently
+                 * refuses them with EINVAL), flags unshare() accepts for other purposes are not. */
+                ASSERT_OK_ERRNO(unshare(CLONE_FS));
+                ASSERT_ERROR_ERRNO(unshare(CLONE_DETACHED), EPERM);
+                ASSERT_ERROR_ERRNO(setns(0, CLONE_DETACHED), EPERM);
+                if (sizeof(long) == 8)
+                        ASSERT_ERROR_ERRNO(syscall(__NR_unshare, (unsigned long) (UINT64_C(1) << 40)), EPERM);
+
+                /* Mount namespaces are retained, hence the mount API is not restricted. */
+                ASSERT_ERROR_ERRNO(fsmount(-EBADF, 0, 0), EBADF);
+
+                _exit(EXIT_SUCCESS);
+        }
+
+        r = ASSERT_OK(pidref_safe_fork("(restrict-namespace-mount-api)", FORK_LOG|FORK_WAIT, /* ret= */ NULL));
+        if (r == 0) {
+                ASSERT_OK(seccomp_restrict_namespaces(CLONE_NEWNET));
+
+                /* open_tree() without OPEN_TREE_CLONE does not create a mount namespace. */
+                _cleanup_close_ int fd = ASSERT_OK_ERRNO(open_tree(AT_FDCWD, "/", OPEN_TREE_CLOEXEC));
+
+                ASSERT_ERROR_ERRNO(open_tree(AT_FDCWD, "/", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC), EPERM);
+                ASSERT_ERROR_ERRNO(open_tree(AT_FDCWD, "/", OPEN_TREE_NAMESPACE|OPEN_TREE_CLOEXEC), EPERM);
+                ASSERT_ERROR_ERRNO(fsmount(-EBADF, 0, 0), EPERM);
 
                 _exit(EXIT_SUCCESS);
         }
