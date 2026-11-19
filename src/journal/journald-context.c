@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "sd-json.h"
+
 #include "alloc-util.h"
 #include "audit-util.h"
 #include "cgroup-util.h"
@@ -30,6 +32,7 @@
 #include "string-util.h"
 #include "syslog-util.h"
 #include "time-util.h"
+#include "uid-classification.h"
 #include "unaligned.h"
 #include "user-util.h"
 
@@ -134,6 +137,7 @@ static int client_context_new(Manager *m, pid_t pid, ClientContext **ret) {
                 .auditid = AUDIT_SESSION_INVALID,
                 .loginuid = UID_INVALID,
                 .owner_uid = UID_INVALID,
+                .userns_owner_uid = UID_INVALID,
                 .lru_index = PRIOQ_IDX_NULL,
                 .timestamp = USEC_INFINITY,
                 .extra_fields_mtime = NSEC_INFINITY,
@@ -170,6 +174,7 @@ static void client_context_reset(Manager *m, ClientContext *c) {
         c->cgroup = mfree(c->cgroup);
         c->session = mfree(c->session);
         c->owner_uid = UID_INVALID;
+        c->userns_owner_uid = UID_INVALID;
         c->unit = mfree(c->unit);
         c->user_unit = mfree(c->user_unit);
         c->slice = mfree(c->slice);
@@ -276,6 +281,63 @@ static int client_context_read_label(
         }
 #endif
 
+        return 0;
+}
+
+static int client_context_read_userns_owner(ClientContext *c) {
+        _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
+        _cleanup_free_ char *p = NULL;
+        struct {
+                uid_t owner;
+                uid_t start;
+                uint32_t size;
+        } info = {
+                .owner = UID_INVALID,
+                .start = UID_INVALID,
+        };
+        uid_t start;
+        int r;
+
+        static const sd_json_dispatch_field dispatch_table[] = {
+                { "owner", SD_JSON_VARIANT_UNSIGNED, sd_json_dispatch_uid_gid, voffsetof(info, owner), SD_JSON_MANDATORY },
+                { "start", SD_JSON_VARIANT_UNSIGNED, sd_json_dispatch_uid_gid, voffsetof(info, start), SD_JSON_MANDATORY },
+                { "size",  SD_JSON_VARIANT_UNSIGNED, sd_json_dispatch_uint32,  voffsetof(info, size),  SD_JSON_MANDATORY },
+                {}
+        };
+
+        assert(c);
+
+        /* This is derived from the UID, which we always get passed along with the message, hence always
+         * reset it, so that it never refers to an older UID. */
+        c->userns_owner_uid = UID_INVALID;
+
+        /* User namespaces allocated by systemd-nsresourced get either a 64K range from the container UID
+         * range, or a single UID from the dynamic UID range. Look up whom it was allocated for in its
+         * registry, the same way systemd-nsresourced does when resolving user records for these UIDs. */
+        if (uid_is_container(c->uid))
+                start = c->uid & UINT32_C(0xFFFF0000);
+        else if (uid_is_dynamic(c->uid))
+                start = c->uid;
+        else
+                return 0;
+
+        if (asprintf(&p, "/run/systemd/nsresource/registry/u" UID_FMT ".userns", start) < 0)
+                return -ENOMEM;
+
+        r = sd_json_parse_file(/* f= */ NULL, p, /* flags= */ 0, &v, /* reterr_line= */ NULL, /* reterr_column= */ NULL);
+        if (r == -ENOENT)
+                return 0;
+        if (r < 0)
+                return r;
+
+        r = sd_json_dispatch(v, dispatch_table, SD_JSON_ALLOW_EXTENSIONS, &info);
+        if (r < 0)
+                return r;
+
+        if (info.start != start || c->uid - start >= info.size)
+                return 0;
+
+        c->userns_owner_uid = info.owner;
         return 0;
 }
 
@@ -549,6 +611,7 @@ static void client_context_really_refresh(
                 client_context_reset(m, c);
 
         client_context_read_uid_gid(c, ucred);
+        (void) client_context_read_userns_owner(c);
         client_context_read_basic(c);
         (void) client_context_read_label(c, label);
 

@@ -1774,6 +1774,13 @@ int add_matches_for_user_unit_full(sd_journal *j, MatchUnitFlag flags, uid_t uid
                 (r = journal_add_match_pair(j, "_SYSTEMD_USER_UNIT", unit)) ||
                 (r = journal_add_matchf(j, "_UID="UID_FMT, uid)) ||
 
+                /* Look for messages from the user service running under transient UIDs, i.e. in a user
+                 * namespace allocated for the user via PrivateUsers=managed. Both fields are trusted ones,
+                 * derived from the cgroup. */
+                (r = sd_journal_add_disjunction(j)) ||
+                (r = journal_add_match_pair(j, "_SYSTEMD_USER_UNIT", unit)) ||
+                (r = journal_add_matchf(j, "_SYSTEMD_OWNER_UID="UID_FMT, uid)) ||
+
                 /* Look for messages from systemd about this service */
                 (r = sd_journal_add_disjunction(j)) ||
                 (r = journal_add_match_pair(j, "USER_UNIT", unit)) ||

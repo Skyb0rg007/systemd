@@ -151,6 +151,14 @@ executables += [
                 ],
         },
         journal_test_template + {
+                'sources' : files('test-journald-split.c'),
+                'dependencies' : [
+                        liblz4_cflags,
+                        libselinux_cflags,
+                        libxz_cflags,
+                ],
+        },
+        journal_test_template + {
                 'sources' : files('test-journald-syslog.c'),
                 'dependencies' : [
                         liblz4_cflags,

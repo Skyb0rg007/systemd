@@ -155,6 +155,12 @@
         control is managed per file, and the journal daemon will assign users read access to their journal files. If
         <literal>uid</literal>, all regular users (with UID outside the range of system users, dynamic service users,
         and the nobody user) will each get their own journal files, and system users will log to the system journal.
+        Messages from processes running under a UID of a user namespace that
+        <citerefentry><refentrytitle>systemd-nsresourced.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+        allocated for a regular user (e.g. via <varname>PrivateUsers=</varname><option>managed</option> in the
+        user's service manager), which is part of the container or dynamic service user UID ranges, are stored in
+        that user's journal files, if the processes are also part of that user's slice
+        (<filename>user-<replaceable>UID</replaceable>.slice</filename>).
         See <ulink url="https://systemd.io/UIDS-GIDS">Users, Groups, UIDs and GIDs on systemd systems</ulink>
         for more details about UID ranges.
         If <literal>none</literal>, journal files are not split up by user and all messages are

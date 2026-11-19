@@ -134,6 +134,13 @@ run0 -u testuser systemd-nspawn -q --pipe -M ocicombo /sbin/init | grep luftikus
 
 run0 -u testuser --pipe systemd-run -q --unit=fimpel --user -p PrivateUsers=managed -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe /sbin/init | grep luftikus >/dev/null
 
+# Output of units in user namespaces allocated for the user ends up in the user's journal, if it's split up by user
+if [[ -d /var/log/journal ]]; then
+    run0 -u testuser systemd-run -q --wait --user --unit=fimpel-journal -p PrivateUsers=managed -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack bash -c 'echo fimpel-journal-marker'
+    journalctl --sync
+    run0 -u testuser journalctl --user -q -u fimpel-journal.service --grep=fimpel-journal-marker >/dev/null
+fi
+
 # With PrivatePIDs=yes, the process that calls mountfsd is not the one that connected to it
 test "$(run0 -u testuser --pipe systemd-run -q --unit=fimpel-pidns --user -p PrivateUsers=managed -p PrivatePIDs=yes -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe readlink /proc/self)" = 1
 
