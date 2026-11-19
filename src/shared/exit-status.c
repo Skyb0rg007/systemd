@@ -72,6 +72,7 @@ const ExitStatusMapping exit_status_mappings[256] = {
         [EXIT_BPF] =                     { "BPF",                     EXIT_STATUS_SYSTEMD },
         [EXIT_KSM] =                     { "KSM",                     EXIT_STATUS_SYSTEMD },
         [EXIT_MEMORY_THP] =              { "MEMORY_THP",              EXIT_STATUS_SYSTEMD },
+        [EXIT_LANDLOCK] =                { "LANDLOCK",                EXIT_STATUS_SYSTEMD },
 
         [EXIT_EXCEPTION] =               { "EXCEPTION",               EXIT_STATUS_SYSTEMD },
 

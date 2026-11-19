@@ -5298,6 +5298,12 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
             <entry><constant>EXIT_MEMORY_THP</constant></entry>
             <entry>Failed to set up the transparent huge page policy. See <varname>MemoryTHP=</varname> above.</entry>
           </row>
+          <row>
+            <entry>247</entry>
+            <entry><constant>EXIT_LANDLOCK</constant></entry>
+            <entry>Failed to apply Landlock restrictions. See <varname>RestrictPtrace=</varname> and
+            <varname>RestrictNamespaces=</varname> above.</entry>
+          </row>
         </tbody>
       </tgroup>
     </table>
