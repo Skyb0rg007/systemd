@@ -388,6 +388,11 @@ TEST(restrict_namespace) {
                 /* Mount namespaces are retained, hence the mount API is not restricted. */
                 ASSERT_ERROR_ERRNO(fsmount(-EBADF, 0, 0), EBADF);
 
+                /* Neither are empty mount namespaces (EINVAL on kernels not supporting them). This moves us
+                 * into a new mount namespace, hence do it last. */
+                r = RET_NERRNO(unshare(UNSHARE_EMPTY_MNTNS));
+                ASSERT_TRUE(r >= 0 || r == -EINVAL);
+
                 _exit(EXIT_SUCCESS);
         }
 
@@ -401,6 +406,7 @@ TEST(restrict_namespace) {
                 ASSERT_ERROR_ERRNO(open_tree(AT_FDCWD, "/", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC), EPERM);
                 ASSERT_ERROR_ERRNO(open_tree(AT_FDCWD, "/", OPEN_TREE_NAMESPACE|OPEN_TREE_CLOEXEC), EPERM);
                 ASSERT_ERROR_ERRNO(fsmount(-EBADF, 0, 0), EPERM);
+                ASSERT_ERROR_ERRNO(unshare(UNSHARE_EMPTY_MNTNS), EPERM);
 
                 _exit(EXIT_SUCCESS);
         }

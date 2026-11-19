@@ -1389,6 +1389,16 @@ static int seccomp_add_mount_namespace_rules(scmp_filter_ctx seccomp) {
          * or with FSMOUNT_NAMESPACE a regular one. Mounts in an anonymous mount namespace can be attached to
          * the current mount namespace with move_mount(), which would allow circumventing the restriction. */
 
+        /* unshare() with UNSHARE_EMPTY_MNTNS creates a mount namespace without CLONE_NEWNS being set. */
+        r = sym_seccomp_rule_add_exact(
+                        seccomp,
+                        SCMP_ACT_ERRNO(EPERM),
+                        SCMP_SYS(unshare),
+                        1,
+                        SCMP_A0(SCMP_CMP_MASKED_EQ, UNSHARE_EMPTY_MNTNS, UNSHARE_EMPTY_MNTNS));
+        if (r < 0)
+                return log_debug_errno(r, "Failed to add unshare() rule: %m");
+
         FOREACH_STRING(name, "open_tree", "open_tree_attr") {
                 id = sym_seccomp_syscall_resolve_name(name);
                 if (id == __NR_SCMP_ERROR) {
@@ -1464,7 +1474,7 @@ static int seccomp_add_unknown_namespace_rules(scmp_filter_ctx seccomp, uint32_t
         for (unsigned i = 0; i < 32; i++) {
                 uint32_t f = UINT32_C(1) << i;
 
-                if (!(f & (NAMESPACE_FLAGS_ALL|UNSHARE_NON_NAMESPACE_FLAGS))) {
+                if (!(f & (NAMESPACE_FLAGS_ALL|UNSHARE_NON_NAMESPACE_FLAGS|UNSHARE_EMPTY_MNTNS))) {
                         r = sym_seccomp_rule_add_exact(
                                         seccomp,
                                         SCMP_ACT_ERRNO(EPERM),
