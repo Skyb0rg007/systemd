@@ -927,6 +927,7 @@ ReserveVT=
 RestrictAddressFamilies=
 RestrictNamespaces=
 RestrictNetworkInterfaces=
+RestrictPtrace=
 RestrictRealtime=
 RestrictSUIDSGID=
 RuntimeDirectory=

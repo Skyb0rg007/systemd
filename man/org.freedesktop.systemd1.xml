@@ -3616,6 +3616,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t DelegateNamespaces = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly b RestrictPtrace = ...;
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly (bas) RestrictFileSystems = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly a(ssbt) BindPaths = [...];
@@ -4248,6 +4250,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
     <!--property RestrictNamespaces is not documented!-->
 
     <!--property DelegateNamespaces is not documented!-->
+
+    <!--property RestrictPtrace is not documented!-->
 
     <!--property RestrictFileSystems is not documented!-->
 
@@ -5012,6 +5016,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictNamespaces"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="DelegateNamespaces"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="RestrictPtrace"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictFileSystems"/>
 
@@ -5943,6 +5949,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2esocket {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t DelegateNamespaces = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly b RestrictPtrace = ...;
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly (bas) RestrictFileSystems = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly a(ssbt) BindPaths = [...];
@@ -6587,6 +6595,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2esocket {
     <!--property RestrictNamespaces is not documented!-->
 
     <!--property DelegateNamespaces is not documented!-->
+
+    <!--property RestrictPtrace is not documented!-->
 
     <!--property RestrictFileSystems is not documented!-->
 
@@ -7327,6 +7337,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2esocket {
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictNamespaces"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="DelegateNamespaces"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="RestrictPtrace"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictFileSystems"/>
 
@@ -8077,6 +8089,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t DelegateNamespaces = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly b RestrictPtrace = ...;
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly (bas) RestrictFileSystems = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly a(ssbt) BindPaths = [...];
@@ -8645,6 +8659,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
     <!--property RestrictNamespaces is not documented!-->
 
     <!--property DelegateNamespaces is not documented!-->
+
+    <!--property RestrictPtrace is not documented!-->
 
     <!--property RestrictFileSystems is not documented!-->
 
@@ -9287,6 +9303,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictNamespaces"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="DelegateNamespaces"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="RestrictPtrace"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictFileSystems"/>
 
@@ -10159,6 +10177,8 @@ node /org/freedesktop/systemd1/unit/dev_2dsda3_2eswap {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t DelegateNamespaces = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly b RestrictPtrace = ...;
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly (bas) RestrictFileSystems = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly a(ssbt) BindPaths = [...];
@@ -10709,6 +10729,8 @@ node /org/freedesktop/systemd1/unit/dev_2dsda3_2eswap {
     <!--property RestrictNamespaces is not documented!-->
 
     <!--property DelegateNamespaces is not documented!-->
+
+    <!--property RestrictPtrace is not documented!-->
 
     <!--property RestrictFileSystems is not documented!-->
 
@@ -11333,6 +11355,8 @@ node /org/freedesktop/systemd1/unit/dev_2dsda3_2eswap {
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictNamespaces"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="DelegateNamespaces"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="RestrictPtrace"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="RestrictFileSystems"/>
 
@@ -13080,6 +13104,7 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <para><varname>RestartRandomizedDelayUSec</varname> was added in version 262.</para>
       <para><varname>ConfigurationDirectorySymlink</varname> was added in version 263.</para>
       <para><varname>IOUringFilter</varname> was added in version 263.</para>
+      <para><varname>RestrictPtrace</varname> was added in version 263.</para>
     </refsect2>
     <refsect2>
       <title>Socket Unit Objects</title>
@@ -13161,6 +13186,7 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <varname>XAttrAccept</varname> were added in version 262.</para>
       <para><varname>ConfigurationDirectorySymlink</varname> was added in version 263.</para>
       <para><varname>IOUringFilter</varname> was added in version 263.</para>
+      <para><varname>RestrictPtrace</varname> was added in version 263.</para>
     </refsect2>
     <refsect2>
       <title>Mount Unit Objects</title>
@@ -13234,6 +13260,7 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <varname>OOMRules</varname> were added in version 261.</para>
       <para><varname>ConfigurationDirectorySymlink</varname> was added in version 263.</para>
       <para><varname>IOUringFilter</varname> was added in version 263.</para>
+      <para><varname>RestrictPtrace</varname> was added in version 263.</para>
     </refsect2>
     <refsect2>
       <title>Swap Unit Objects</title>
@@ -13305,6 +13332,7 @@ $ gdbus introspect --system --dest org.freedesktop.systemd1 \
       <varname>OOMRules</varname> were added in version 261.</para>
       <para><varname>ConfigurationDirectorySymlink</varname> was added in version 263.</para>
       <para><varname>IOUringFilter</varname> was added in version 263.</para>
+      <para><varname>RestrictPtrace</varname> was added in version 263.</para>
     </refsect2>
     <refsect2>
       <title>Slice Unit Objects</title>

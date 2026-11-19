@@ -963,6 +963,7 @@ int unit_exec_context_build_json(sd_json_variant **ret, const char *name, void *
                         SD_JSON_BUILD_PAIR_BOOLEAN("MemoryDenyWriteExecute", c->memory_deny_write_execute),
                         SD_JSON_BUILD_PAIR_BOOLEAN("RestrictRealtime", c->restrict_realtime),
                         SD_JSON_BUILD_PAIR_BOOLEAN("RestrictSUIDSGID", c->restrict_suid_sgid),
+                        SD_JSON_BUILD_PAIR_BOOLEAN("RestrictPtrace", c->restrict_ptrace),
                         SD_JSON_BUILD_PAIR_BOOLEAN("RemoveIPC", c->remove_ipc),
                         JSON_BUILD_PAIR_TRISTATE_NON_NULL("PrivateMounts", c->private_mounts),
                         JSON_BUILD_PAIR_MOUNT_PROPAGATION_FLAG("MountFlags", mount_propagation_flag_to_string(c->mount_propagation_flag)),
@@ -1076,6 +1077,7 @@ struct TransientExecContextParameters {
         int remove_ipc;
         int restrict_realtime;
         int restrict_suid_sgid;
+        int restrict_ptrace;
         int root_ephemeral;
         /* Enums: parsed via JSON_DISPATCH_ENUM_DEFINE dispatchers, negative = absent. */
         ExecInput std_input;
@@ -1531,6 +1533,7 @@ static DEFINE_APPLY_EXEC(private_network,           "PrivateNetwork",         va
 static DEFINE_APPLY_EXEC(remove_ipc,                "RemoveIPC",              varlink_apply_tristate_bool);
 static DEFINE_APPLY_EXEC(restrict_realtime,         "RestrictRealtime",       varlink_apply_tristate_bool);
 static DEFINE_APPLY_EXEC(restrict_suid_sgid,        "RestrictSUIDSGID",       varlink_apply_tristate_bool);
+static DEFINE_APPLY_EXEC(restrict_ptrace,           "RestrictPtrace",         varlink_apply_tristate_bool);
 static DEFINE_APPLY_EXEC(root_ephemeral,            "RootEphemeral",          varlink_apply_tristate_bool);
 
 /* The stdio types that require a companion setting: the file based ones need a path (StandardInputFile=,
@@ -1697,6 +1700,7 @@ static const TransientExecProperty exec_properties[] = {
         EXEC_PROPERTY_TRISTATE_BOOL("MemoryDenyWriteExecute", memory_deny_write_execute),
         EXEC_PROPERTY_TRISTATE_BOOL("RestrictRealtime",       restrict_realtime),
         EXEC_PROPERTY_TRISTATE_BOOL("RestrictSUIDSGID",       restrict_suid_sgid),
+        EXEC_PROPERTY_TRISTATE_BOOL("RestrictPtrace",         restrict_ptrace),
         EXEC_PROPERTY_TRISTATE_BOOL("RemoveIPC",              remove_ipc),
         EXEC_PROPERTY              ("IOUringFilter",          io_uring_filter,           SD_JSON_VARIANT_OBJECT),
         EXEC_PROPERTY_SETTABLE     ("Environment",            environment,               SD_JSON_VARIANT_ARRAY),

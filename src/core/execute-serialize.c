@@ -2353,6 +2353,10 @@ static int exec_context_serialize(const ExecContext *c, FILE *f) {
         if (r < 0)
                 return r;
 
+        r = serialize_bool_elide(f, "exec-context-restrict-ptrace", c->restrict_ptrace);
+        if (r < 0)
+                return r;
+
 #if HAVE_SECCOMP
         if (!hashmap_isempty(c->syscall_filter)) {
                 void *errno_num, *id;
@@ -3407,6 +3411,11 @@ static int exec_context_deserialize(ExecContext *c, FILE *f) {
                         if (r < 0)
                                 return r;
                         c->lock_personality = r;
+                } else if ((val = startswith(l, "exec-context-restrict-ptrace="))) {
+                        r = parse_boolean(val);
+                        if (r < 0)
+                                return r;
+                        c->restrict_ptrace = r;
 #if HAVE_SECCOMP
                 } else if ((val = startswith(l, "exec-context-syscall-filter="))) {
                         _cleanup_free_ char *s_id = NULL, *s_errno_num = NULL;

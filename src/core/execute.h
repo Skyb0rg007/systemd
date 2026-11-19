@@ -362,6 +362,7 @@ typedef struct ExecContext {
         bool memory_deny_write_execute;
         bool restrict_realtime;
         bool restrict_suid_sgid;
+        bool restrict_ptrace;
 
         bool lock_personality;
         unsigned long personality;

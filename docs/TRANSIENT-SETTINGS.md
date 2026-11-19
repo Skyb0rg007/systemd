@@ -210,6 +210,7 @@ All execution-related settings are available for transient units.
 ✓ SystemCallLog=
 ✓ MemoryDenyWriteExecute=
 ✓ RestrictNamespaces=
+✓ RestrictPtrace=
 ✓ RestrictRealtime=
 ✓ RestrictSUIDSGID=
 ✓ RestrictAddressFamilies=

@@ -2674,6 +2674,7 @@ static const BusProperty execute_properties[] = {
         { "BindLogSockets",                        bus_append_parse_boolean                      },
         { "CPUSchedulingResetOnFork",              bus_append_parse_boolean                      },
         { "LockPersonality",                       bus_append_parse_boolean                      },
+        { "RestrictPtrace",                        bus_append_parse_boolean                      },
         { "MemoryKSM",                             bus_append_parse_boolean                      },
         { "MemoryTHP",                             bus_append_string                             },
         { "RestrictSUIDSGID",                      bus_append_parse_boolean                      },

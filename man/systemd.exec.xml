@@ -2780,6 +2780,32 @@ RestrictNamespaces=~cgroup net</programlisting>
       </varlistentry>
 
       <varlistentry>
+        <term><varname>RestrictPtrace=</varname></term>
+
+        <listitem><para>Takes a boolean argument. If true, the processes of this unit may use <citerefentry
+        project='man-pages'><refentrytitle>ptrace</refentrytitle><manvolnum>2</manvolnum></citerefentry> and
+        all other operations subject to ptrace access mode checks only on processes they started themselves,
+        directly or indirectly. Such operations include reading
+        <filename>/proc/<replaceable>PID</replaceable>/exe</filename>,
+        <filename>/proc/<replaceable>PID</replaceable>/environ</filename>,
+        <filename>/proc/<replaceable>PID</replaceable>/fd/</filename> and
+        <filename>/proc/<replaceable>PID</replaceable>/ns/</filename>, as well as <citerefentry
+        project='man-pages'><refentrytitle>process_vm_readv</refentrytitle><manvolnum>2</manvolnum></citerefentry>,
+        <citerefentry project='man-pages'><refentrytitle>pidfd_getfd</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+        and <citerefentry project='man-pages'><refentrytitle>kcmp</refentrytitle><manvolnum>2</manvolnum></citerefentry>.
+        The restriction applies regardless of the user and the capabilities of the processes, including
+        <constant>CAP_SYS_PTRACE</constant>. Note that each command line of the unit (for example those
+        configured with <varname>ExecStartPre=</varname> or <varname>ExecReload=</varname>) is restricted
+        separately, and hence cannot inspect the processes started for other command lines of the same unit,
+        such as the main process. Defaults to false.</para>
+
+        <para>This setting is implemented with Landlock and requires Landlock ABI version 12 (Linux 7.4 or
+        newer). On older kernels, it has no effect.</para>
+
+        <xi:include href="version-info.xml" xpointer="v263"/></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><varname>PrivateBPF=</varname></term>
 
         <listitem><para>Takes a boolean argument. If set, mount a private instance of the BPF filesystem

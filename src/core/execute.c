@@ -1600,6 +1600,10 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                 "%sLockPersonality: %s\n",
                 prefix, yes_no(c->lock_personality));
 
+        fprintf(f,
+                "%sRestrictPtrace: %s\n",
+                prefix, yes_no(c->restrict_ptrace));
+
         if (c->syscall_filter) {
                 fprintf(f,
                         "%sSystemCallFilter: ",
