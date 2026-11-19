@@ -54,6 +54,7 @@
 #include "io-util.h"
 #include "iovec-util.h"
 #include "journal-send.h"
+#include "landlock-util.h"
 #include "libmount-util.h"
 #include "manager.h"
 #include "memfd-util.h"
@@ -1767,7 +1768,7 @@ static bool context_has_syscall_logs(const ExecContext *c) {
 static bool context_has_seccomp(const ExecContext *c) {
         assert(c);
 
-        /* We need NNP if we have any form of seccomp or io_uring filters and are unprivileged */
+        /* We need NNP if we have any form of seccomp, Landlock or io_uring filters and are unprivileged */
         return c->lock_personality ||
                 c->memory_deny_write_execute ||
                 c->private_devices ||
@@ -2238,19 +2239,6 @@ static int apply_private_devices(const ExecContext *c, const ExecParameters *p) 
         return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_RAW_IO, SCMP_ACT_ERRNO(EPERM), /* log_missing= */ false);
 }
 
-static int apply_restrict_namespaces(const ExecContext *c, const ExecParameters *p) {
-        assert(c);
-        assert(p);
-
-        if (!exec_context_restrict_namespaces_set(c))
-                return 0;
-
-        if (skip_seccomp_unavailable("RestrictNamespaces="))
-                return 0;
-
-        return seccomp_restrict_namespaces(c->restrict_namespaces);
-}
-
 static int apply_lock_personality(const ExecContext *c, const ExecParameters *p) {
         unsigned long personality;
         int r;
@@ -2278,6 +2266,38 @@ static int apply_lock_personality(const ExecContext *c, const ExecParameters *p)
 }
 
 #endif
+
+static int apply_restrict_namespaces(const ExecContext *c, const ExecParameters *p, LandlockRuleset *landlock) {
+        int r;
+
+        assert(c);
+        assert(p);
+        assert(landlock);
+
+        if (!exec_context_restrict_namespaces_set(c))
+                return 0;
+
+        /* Prefer Landlock, as it can also restrict clone3(), whose flags seccomp cannot inspect, so the
+         * seccomp implementation has to block clone3() altogether. The Landlock restriction is only
+         * recorded here, and enforced later together with all other Landlock restrictions. Recording it can
+         * only fail if Landlock cannot be used for this, in which case we fall back to seccomp, so failures
+         * of this function are always seccomp failures. */
+        r = landlock_ruleset_restrict_namespaces(landlock, c->restrict_namespaces);
+        if (r >= 0)
+                return 0;
+
+#if HAVE_SECCOMP
+        log_debug_errno(r, "Cannot restrict namespaces via Landlock, falling back to seccomp: %m");
+
+        if (skip_seccomp_unavailable("RestrictNamespaces="))
+                return 0;
+
+        return seccomp_restrict_namespaces(c->restrict_namespaces);
+#else
+        log_debug_errno(r, "Cannot restrict namespaces via Landlock and seccomp support is not compiled in, skipping RestrictNamespaces=: %m");
+        return 0;
+#endif
+}
 
 #if HAVE_LIBBPF
 static int apply_restrict_filesystems(const ExecContext *c, const ExecParameters *p) {
@@ -7040,6 +7060,16 @@ int exec_invoke(
                         }
                 }
 
+                /* Landlock restrictions are collected here by the various apply_xyz() helpers and
+                 * enforced as a single Landlock domain below. */
+                LandlockRuleset landlock = {};
+
+                r = apply_restrict_namespaces(context, params, &landlock);
+                if (r < 0) {
+                        *exit_status = EXIT_SECCOMP;
+                        return log_error_errno(r, "Failed to apply namespace restrictions: %m");
+                }
+
 #if HAVE_SECCOMP
                 r = apply_address_families(context, params);
                 if (r < 0) {
@@ -7063,12 +7093,6 @@ int exec_invoke(
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         return log_error_errno(r, "Failed to apply SUID/SGID restrictions: %m");
-                }
-
-                r = apply_restrict_namespaces(context, params);
-                if (r < 0) {
-                        *exit_status = EXIT_SECCOMP;
-                        return log_error_errno(r, "Failed to apply namespace restrictions: %m");
                 }
 
                 r = apply_protect_sysctl(context, params);
@@ -7146,6 +7170,14 @@ int exec_invoke(
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         return log_error_errno(r, "Failed to apply io_uring filters: %m");
+                }
+
+                /* This has to happen before the system call filter is applied, as that might deny
+                 * landlock_restrict_self(). */
+                r = landlock_ruleset_enforce(&landlock);
+                if (r < 0) {
+                        *exit_status = EXIT_LANDLOCK;
+                        return log_error_errno(r, "Failed to apply Landlock restrictions: %m");
                 }
 
 #if HAVE_SECCOMP
