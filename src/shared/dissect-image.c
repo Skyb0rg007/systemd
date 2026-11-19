@@ -5957,13 +5957,15 @@ int mountfsd_mount_image(
         return 0;
 }
 
-int mountfsd_mount_directory_fd(
+int mountfsd_mount_directory_fd_full(
                 sd_varlink *vl,
                 int directory_fd,
                 int userns_fd,
                 DissectImageFlags flags,
+                int log_level,
                 int *ret_mount_fd) {
 
+        const char *error_id = NULL;
         int r;
 
         assert(directory_fd >= 0);
@@ -5992,10 +5994,11 @@ int mountfsd_mount_directory_fd(
         }
 
         sd_json_variant *reply = NULL;
-        r = varlink_callbo_and_log(
+        r = sd_varlink_callbo(
                         vl,
                         "io.systemd.MountFileSystem.MountDirectory",
                         &reply,
+                        &error_id,
                         SD_JSON_BUILD_PAIR_UNSIGNED("directoryFileDescriptor", 0),
                         SD_JSON_BUILD_PAIR_CONDITION(userns_fd >= 0, "userNamespaceFileDescriptor", SD_JSON_BUILD_UNSIGNED(1)),
                         SD_JSON_BUILD_PAIR_BOOLEAN("readOnly", FLAGS_SET(flags, DISSECT_IMAGE_MOUNT_READ_ONLY)),
@@ -6003,7 +6006,14 @@ int mountfsd_mount_directory_fd(
                                                           FLAGS_SET(flags, DISSECT_IMAGE_IDENTITY_UID) ? "identity" : "auto"),
                         SD_JSON_BUILD_PAIR_BOOLEAN("allowInteractiveAuthentication", FLAGS_SET(flags, DISSECT_IMAGE_ALLOW_INTERACTIVE_AUTH)));
         if (r < 0)
-                return r;
+                return log_full_errno(log_level, r, "Failed to issue MountDirectory() varlink call: %m");
+        if (error_id) {
+                r = sd_varlink_error_to_errno(error_id, reply);
+                if (r != -EBADR)
+                        return log_full_errno(log_level, r, "Failed to issue MountDirectory() varlink call: %m");
+
+                return log_full_errno(log_level, r, "Failed to issue MountDirectory() varlink call: %s", error_id);
+        }
 
         static const sd_json_dispatch_field dispatch_table[] = {
                 { "mountFileDescriptor", _SD_JSON_VARIANT_TYPE_INVALID, sd_json_dispatch_uint, 0, SD_JSON_MANDATORY },
@@ -6023,11 +6033,22 @@ int mountfsd_mount_directory_fd(
         return 0;
 }
 
-int mountfsd_mount_directory(
+int mountfsd_mount_directory_fd(
+                sd_varlink *vl,
+                int directory_fd,
+                int userns_fd,
+                DissectImageFlags flags,
+                int *ret_mount_fd) {
+
+        return mountfsd_mount_directory_fd_full(vl, directory_fd, userns_fd, flags, LOG_ERR, ret_mount_fd);
+}
+
+int mountfsd_mount_directory_full(
                 sd_varlink *vl,
                 const char *path,
                 int userns_fd,
                 DissectImageFlags flags,
+                int log_level,
                 int *ret_mount_fd) {
 
         assert(path);
@@ -6037,7 +6058,17 @@ int mountfsd_mount_directory(
         if (directory_fd < 0)
                 return log_debug_errno(directory_fd, "Failed to open '%s': %m", path);
 
-        return mountfsd_mount_directory_fd(vl, directory_fd, userns_fd, flags, ret_mount_fd);
+        return mountfsd_mount_directory_fd_full(vl, directory_fd, userns_fd, flags, log_level, ret_mount_fd);
+}
+
+int mountfsd_mount_directory(
+                sd_varlink *vl,
+                const char *path,
+                int userns_fd,
+                DissectImageFlags flags,
+                int *ret_mount_fd) {
+
+        return mountfsd_mount_directory_full(vl, path, userns_fd, flags, LOG_ERR, ret_mount_fd);
 }
 
 int mkdir_foreign_at_full(int parent_fd, const char *name, mode_t mode, XOpenFlags xopen_flags, int *ret_directory_fd) {
