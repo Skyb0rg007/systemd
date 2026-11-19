@@ -5284,9 +5284,19 @@ StandardInputData=V2XigLJyZSBubyBzdHJhbmdlcnMgdG8gbG92ZQpZb3Uga25vdyB0aGUgcnVsZX
             <entry>Failed to set up unit's credentials. See <varname>ImportCredential=</varname>, <varname>LoadCredential=</varname> and <varname>SetCredential=</varname> above.</entry>
           </row>
           <row>
-            <entry>245</entry>
+            <entry>244</entry>
             <entry><constant>EXIT_BPF</constant></entry>
             <entry>Failed to apply BPF restrictions. See <varname>RestrictFileSystems=</varname> above.</entry>
+          </row>
+          <row>
+            <entry>245</entry>
+            <entry><constant>EXIT_KSM</constant></entry>
+            <entry>Failed to set up kernel samepage merging. See <varname>MemoryKSM=</varname> above.</entry>
+          </row>
+          <row>
+            <entry>246</entry>
+            <entry><constant>EXIT_MEMORY_THP</constant></entry>
+            <entry>Failed to set up the transparent huge page policy. See <varname>MemoryTHP=</varname> above.</entry>
           </row>
         </tbody>
       </tgroup>
