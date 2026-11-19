@@ -146,8 +146,9 @@ rm "/run/user/$(id -u testuser)/fimpel-bind"
 
 # With PrivateDevices=yes, units in a managed user namespace get their own devpts instance, hence the PTYs they
 # allocate belong to their own tty group. The system service manager sets up the mount namespace before joining
-# the user namespace, i.e. this checks that it uses the group's ID as seen from outside of it.
+# the user namespace, i.e. uses the group's ID as seen from outside of it, the per-user one from within.
 systemd-run -q --wait --pipe --unit=fimpel-devpts-system -p PrivateUsers=managed -p PrivateDevices=yes bash -c 'exec 3<>/dev/ptmx && [[ "$(stat -c %g /dev/pts/0)" == 5 ]]'
+run0 -u testuser --pipe systemd-run -q --unit=fimpel-devpts --user -p PrivateUsers=managed -p PrivateDevices=yes -p RootMStack=/home/testuser/.local/state/machines/ocicombo.mstack --pipe bash -c 'exec 3<>/dev/ptmx && [[ "$(stat -c %g /dev/pts/0)" == 5 ]]'
 
 # Output of units in user namespaces allocated for the user ends up in the user's journal, if it's split up by user
 if [[ -d /var/log/journal ]]; then
