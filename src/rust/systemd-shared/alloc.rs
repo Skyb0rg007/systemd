@@ -60,7 +60,7 @@ fn dangling(layout: Layout) -> NonNull<[u8]> {
 ///
 /// A block an allocator hands out satisfies the layout it was requested for and stays valid until it is passed
 /// to [`Allocator::deallocate()`], [`Allocator::grow()`] or [`Allocator::shrink()`], also when the allocator is
-/// moved, copied or cloned: a copy takes blocks of the original and the other way round.
+/// moved. That copies and clones share blocks with the original is promised by [`AllocatorClone`] only.
 pub unsafe trait Allocator {
     /// Allocates a block for `layout`, at least as large as it asks for: the length of the result says how
     /// large. A zero-sized layout gets a dangling block that must not be dereferenced.
@@ -148,6 +148,15 @@ pub unsafe trait Allocator {
         Ok(p)
     }
 }
+
+/// An [`Allocator`] whose clones and copies are interchangeable with it: a block one of them hands out may go
+/// back to any other, and dropping one leaves the blocks valid while the others live. This is
+/// `core::alloc::AllocatorClone` as nightly Rust has it, still unstable there.
+///
+/// # Safety
+///
+/// Clones and copies of the allocator must be equivalent to it as described above, and cloning must not panic.
+pub unsafe trait AllocatorClone: Allocator + Clone {}
 
 /// `malloc()` and friends, as for the C code, so that Rust and C allocations share one heap. The allocator of
 /// [`Box`] and [`Vec`] unless another one is named.
@@ -253,6 +262,9 @@ unsafe impl Allocator for Malloc {
     }
 }
 
+// SAFETY: there is one heap, every Malloc frees what any other allocated.
+unsafe impl AllocatorClone for Malloc {}
+
 /// Like [`Malloc`], but memory is erased before it is freed, also when growing or shrinking moves it, as
 /// `erase_and_free()` does in C. For keys, passphrases and other secrets, e.g. `Vec<u8, Erasing>`. Elements a
 /// [`Vec`] drops early, with [`Vec::pop()`] or [`Vec::truncate()`], stay in its memory until it is freed.
@@ -276,6 +288,9 @@ unsafe impl Allocator for Erasing {
         unsafe { sys::erase_and_free(ptr.as_ptr().cast()) };
     }
 }
+
+// SAFETY: as for Malloc, whose heap it uses.
+unsafe impl AllocatorClone for Erasing {}
 
 /// An owned `T` on the heap, like `alloc::boxed::Box` but without the paths that abort when memory runs out:
 /// [`Box::new()`] returns an error instead. A boxed slice comes from [`Vec::into_boxed_slice()`].
