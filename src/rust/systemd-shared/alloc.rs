@@ -286,6 +286,21 @@ impl<T> Box<T> {
     pub fn new(x: T) -> Result<Box<T>, AllocError> {
         Box::new_in(x, Malloc)
     }
+
+    /// Gives up ownership of the value, for handing it to C as userdata. [`Box::from_raw()`] takes it back.
+    pub fn into_raw(b: Box<T>) -> NonNull<T> {
+        let b = ManuallyDrop::new(b);
+        b.0
+    }
+
+    /// Takes back ownership of a value that [`Box::into_raw()`] gave up.
+    ///
+    /// # Safety
+    ///
+    /// `p` must come from [`Box::into_raw()`] and not have been taken back yet.
+    pub unsafe fn from_raw(p: NonNull<T>) -> Box<T> {
+        Box(p, Malloc)
+    }
 }
 
 impl<T, A: Allocator> Box<T, A> {
@@ -487,6 +502,23 @@ impl<T, A: Allocator> Vec<T, A> {
         self.len -= 1;
         // SAFETY: the element at the old last index is initialized and no longer counted, it is read once.
         Some(unsafe { self.ptr.as_ptr().add(self.len).read() })
+    }
+
+    /// Removes the element at `index`, shifting the ones after it down, and returns it. `None` if `index` is
+    /// out of bounds.
+    pub fn remove(&mut self, index: usize) -> Option<T> {
+        if index >= self.len {
+            return None;
+        }
+        // SAFETY: the element at index is initialized and read once, the ones after it move down by one within
+        // the allocation, and the length shrinks so that the duplicate at the end is no longer counted.
+        unsafe {
+            let p = self.ptr.as_ptr().add(index);
+            let v = p.read();
+            ptr::copy(p.add(1), p, self.len - index - 1);
+            self.len -= 1;
+            Some(v)
+        }
     }
 
     /// Drops the elements past `len`, keeping the allocation.
