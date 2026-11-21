@@ -95,6 +95,8 @@ TEST(restrict_namespaces) {
                 ASSERT_ERROR_ERRNO(unshare(CLONE_NEWNET), EPERM);
                 ASSERT_ERROR_ERRNO(unshare(CLONE_NEWIPC), EPERM);
                 ASSERT_ERROR_ERRNO(unshare(CLONE_NEWUTS|CLONE_NEWNET), EPERM);
+                /* Creates a mount namespace without CLONE_NEWNS being passed. */
+                ASSERT_ERROR_ERRNO(unshare(UNSHARE_EMPTY_MNTNS), EPERM);
 
                 /* clone3() must not be blocked wholesale, only the restricted namespace types. */
                 ASSERT_OK(clone3_and_wait(0));
