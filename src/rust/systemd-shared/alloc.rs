@@ -150,7 +150,8 @@ pub unsafe trait Allocator {
 }
 
 /// An [`Allocator`] whose clones and copies are interchangeable with it: a block one of them hands out may go
-/// back to any other, and dropping one leaves the blocks valid while the others live. This is
+/// back to any other, and dropping one leaves the blocks valid while the others live. [`Rc`](crate::rc::Rc) and
+/// [`Weak`](crate::rc::Weak) need this to give each reference its own copy of the allocator. This is
 /// `core::alloc::AllocatorClone` as nightly Rust has it, still unstable there.
 ///
 /// # Safety

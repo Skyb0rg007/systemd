@@ -160,6 +160,7 @@ systemd_shared_sources = files(
         'path.rs',
         'prelude.rs',
         'program.rs',
+        'rc.rs',
         'recurse_dir.rs',
         'stdio.rs',
         'strv.rs',

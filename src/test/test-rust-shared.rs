@@ -2,24 +2,26 @@
 
 //! Tests the systemd_shared crate, and through it libsystemd-shared from a program written in Rust: exported
 //! functions, a static inline trampoline, a union passed by value, the errno conventions,
-//! the libc constants, file descriptors, logging, the fallible Box and Vec, and the wrappers of keyrings, VOA
-//! lookups, X.509 certificates, tables and files that systemd-keyring-setup uses.
+//! the libc constants, file descriptors, logging, the fallible Box, Vec and Rc, and the wrappers of keyrings,
+//! VOA lookups, X.509 certificates, tables and files that systemd-keyring-setup uses.
 //! This is also the end-to-end test for the Rust support in meson.build.
 
 #![no_std]
 #![no_main]
 
 use core::alloc::Layout;
+use core::cell::Cell;
 use core::ffi::{c_char, c_int, CStr};
 use core::mem::{align_of, size_of};
 use core::ptr::{self, NonNull};
 
-use systemd_shared::alloc::{Allocator, Erasing, Malloc};
+use systemd_shared::alloc::{Allocator, AllocatorClone, Erasing, Malloc};
 use systemd_shared::chase::{self, CHASE_MKDIR_0755};
 use systemd_shared::cstr::{self, display};
 use systemd_shared::keyring;
 use systemd_shared::path;
 use systemd_shared::prelude::*;
+use systemd_shared::rc::{Rc, Weak};
 use systemd_shared::recurse_dir::{self, RECURSE_DIR_SORT};
 use systemd_shared::table::{Table, TABLE_ERSATZ_DASH};
 use systemd_shared::tmpfile::{LinkableTmpfile, LINK_TMPFILE_REPLACE};
@@ -427,6 +429,76 @@ fn test_alloc_zero_sized() {
     v.push(1u8).unwrap();
     v.clear();
     drop(v.into_boxed_slice().unwrap());
+}
+
+/// Malloc, counting the blocks it has handed out and not taken back.
+#[derive(Clone)]
+struct Counting<'a>(&'a Cell<usize>);
+
+// SAFETY: blocks come from Malloc and go back to it, the counter is only bookkeeping.
+unsafe impl Allocator for Counting<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let p = Malloc.allocate(layout)?;
+        self.0.set(self.0.get() + 1);
+        Ok(p)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.0.set(self.0.get() - 1);
+        // SAFETY: the block came from Malloc, as the caller guarantees.
+        unsafe { Malloc.deallocate(ptr, layout) };
+    }
+}
+
+// SAFETY: all clones use Malloc.
+unsafe impl AllocatorClone for Counting<'_> {}
+
+fn test_rc_allocator() {
+    // Just a pointer with the default allocator, so None stays the C NULL.
+    assert_eq!(size_of::<Rc<u8>>(), size_of::<usize>());
+    assert_eq!(size_of::<Option<Rc<u8>>>(), size_of::<usize>());
+
+    // The block outlives the value while a Weak holds on, and goes back to the allocator with the last one.
+    let live = Cell::new(0);
+    let a = Rc::new_in(42u32, Counting(&live)).unwrap();
+    assert_eq!(live.get(), 1);
+    let b = Rc::clone(&a);
+    let w = Rc::downgrade(&b);
+    assert_eq!(Rc::strong_count(&a), 2);
+    drop(a);
+    assert_eq!(*w.upgrade().unwrap(), 42);
+    drop(b);
+    assert!(w.upgrade().is_none());
+    assert_eq!(live.get(), 1);
+    drop(w);
+    assert_eq!(live.get(), 0);
+
+    // A reference handed to C and taken back keeps the allocator it was made with.
+    let (p, alloc) = Rc::into_raw_with_allocator(Rc::new_in(7u8, Counting(&live)).unwrap());
+    // SAFETY: p and its allocator came from into_raw_with_allocator() and are taken back once.
+    let c = unsafe { Rc::from_raw_in(p, alloc) };
+    assert_eq!(*c, 7);
+    drop(c);
+    assert_eq!(live.get(), 0);
+
+    // The Weak a cyclic value gets refuses to upgrade until the value exists.
+    struct Node<'a> {
+        me: Weak<Node<'a>, Counting<'a>>,
+    }
+    let cyclic = Rc::new_cyclic_in(
+        |me| {
+            assert!(me.upgrade().is_none());
+            Node { me: me.clone() }
+        },
+        Counting(&live),
+    )
+    .unwrap();
+    assert!(Rc::ptr_eq(&cyclic.me.upgrade().unwrap(), &cyclic));
+    drop(cyclic);
+    assert_eq!(live.get(), 0);
+
+    let key = Rc::new_in([0x42u8; 32], Erasing).unwrap();
+    assert_eq!(*Rc::clone(&key), [0x42; 32]);
 }
 
 fn test_print() {
@@ -1084,6 +1156,7 @@ define_test_main!(
         test_alloc,
         test_alloc_erasing,
         test_alloc_zero_sized,
+        test_rc_allocator,
         test_print,
         test_constants,
         test_voa,

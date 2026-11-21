@@ -54,6 +54,7 @@ mod panic;
 pub mod path;
 pub mod prelude;
 pub mod program;
+pub mod rc;
 pub mod recurse_dir;
 pub mod stdio;
 pub mod strv;
