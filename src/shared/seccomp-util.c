@@ -1446,6 +1446,87 @@ static int seccomp_add_mount_namespace_rules(scmp_filter_ctx seccomp, uint32_t a
         return 0;
 }
 
+static bool seccomp_arch_has_64bit_args(uint32_t arch) {
+        /* libseccomp silently truncates comparison values to 32 bits on architectures with 32-bit system
+         * call arguments, which would turn rules matching the upper 32 bits into rules matching anything. */
+        switch (arch) {
+        case SCMP_ARCH_X86_64:
+        case SCMP_ARCH_AARCH64:
+#ifdef SCMP_ARCH_LOONGARCH64
+        case SCMP_ARCH_LOONGARCH64:
+#endif
+        case SCMP_ARCH_MIPS64:
+        case SCMP_ARCH_MIPSEL64:
+        case SCMP_ARCH_PARISC64:
+        case SCMP_ARCH_PPC64:
+        case SCMP_ARCH_PPC64LE:
+#ifdef SCMP_ARCH_RISCV64
+        case SCMP_ARCH_RISCV64:
+#endif
+        case SCMP_ARCH_S390X:
+                return true;
+        default:
+                return false;
+        }
+}
+
+/* The flags unshare() accepts that do not create namespaces. */
+#define UNSHARE_NON_NAMESPACE_FLAGS (CLONE_THREAD|CLONE_FS|CLONE_SIGHAND|CLONE_VM|CLONE_FILES|CLONE_SYSVSEM)
+
+static int seccomp_add_unknown_namespace_rules(scmp_filter_ctx seccomp, uint32_t arch, unsigned long retain) {
+        int r;
+
+        assert(seccomp);
+
+        /* Any restriction also prohibits namespace types we do not know about. New namespace types can
+         * only be requested via unshare(), setns() and clone3(): all bits of the flags parameter of clone()
+         * are allocated already, and clone3() is blocked altogether. Hence block every flag that unshare()
+         * or setns() might interpret as a namespace type in the future, i.e. every flag except those of
+         * known namespace types and those unshare() accepts for other purposes. UNSHARE_EMPTY_MNTNS is
+         * handled by seccomp_add_mount_namespace_rules(), as it creates a mount namespace. */
+
+        for (unsigned i = 0; i < 32; i++) {
+                uint32_t f = UINT32_C(1) << i;
+
+                if (!(f & (NAMESPACE_FLAGS_ALL|UNSHARE_NON_NAMESPACE_FLAGS|UNSHARE_EMPTY_MNTNS))) {
+                        r = sym_seccomp_rule_add_exact(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPERM),
+                                        SCMP_SYS(unshare),
+                                        1,
+                                        SCMP_A0(SCMP_CMP_MASKED_EQ, f, f));
+                        if (r < 0)
+                                return r;
+                }
+
+                /* If no namespace type is retained, setns() is blocked altogether already. The kernel
+                 * takes nstype as an int, hence only the lower 32 bits matter. */
+                if ((retain & NAMESPACE_FLAGS_ALL) != 0 && !(f & NAMESPACE_FLAGS_ALL)) {
+                        r = sym_seccomp_rule_add_exact(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPERM),
+                                        SCMP_SYS(setns),
+                                        1,
+                                        SCMP_A1(SCMP_CMP_MASKED_EQ, f, f));
+                        if (r < 0)
+                                return r;
+                }
+        }
+
+        if (seccomp_arch_has_64bit_args(arch)) {
+                r = sym_seccomp_rule_add_exact(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(unshare),
+                                1,
+                                SCMP_A0(SCMP_CMP_GE, UINT64_C(1) << 32));
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
 int seccomp_restrict_namespaces(unsigned long retain) {
         uint32_t arch;
         int r;
@@ -1582,6 +1663,13 @@ int seccomp_restrict_namespaces(unsigned long retain) {
                                                 seccomp_arch_to_string(arch));
                                 continue;
                         }
+                }
+
+                r = seccomp_add_unknown_namespace_rules(seccomp, arch, retain);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to add rules for unknown namespace types for architecture %s, skipping: %m",
+                                        seccomp_arch_to_string(arch));
+                        continue;
                 }
 
                 r = sym_seccomp_load(seccomp);

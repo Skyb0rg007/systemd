@@ -377,6 +377,14 @@ TEST(restrict_namespace) {
                 ASSERT_ERROR_ERRNO(raw_clone(CLONE_NEWIPC), EPERM);
                 ASSERT_ERROR_ERRNO(raw_clone(CLONE_NEWNET|CLONE_NEWUTS), EPERM);
 
+                /* Flags that might denote namespace types unknown to us are blocked (the kernel currently
+                 * refuses them with EINVAL), flags unshare() accepts for other purposes are not. */
+                ASSERT_OK_ERRNO(unshare(CLONE_FS));
+                ASSERT_ERROR_ERRNO(unshare(CLONE_DETACHED), EPERM);
+                ASSERT_ERROR_ERRNO(setns(0, CLONE_DETACHED), EPERM);
+                if (sizeof(long) == 8)
+                        ASSERT_ERROR_ERRNO(syscall(__NR_unshare, (unsigned long) (UINT64_C(1) << 40)), EPERM);
+
                 /* Mount namespaces are retained, hence the mount API is not restricted: the kernel refuses
                  * the invalid file descriptors with EBADF, while the filter would refuse them with EPERM. */
                 ASSERT_ERROR_ERRNO(open_tree(-EBADF, "x", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC), EBADF);
