@@ -2461,7 +2461,7 @@ static int seccomp_restrict_sxid(scmp_filter_ctx seccomp, mode_t m) {
         /* Checks the mode_t parameter of the following system calls:
          *
          *       → chmod() + fchmod() + fchmodat() + fchmodat2()
-         *       → open() + creat() + openat()
+         *       → open() + creat() + openat(), with O_CREAT or O_TMPFILE
          *       → mkdir() + mkdirat()
          *       → mknod() + mknodat()
          *
@@ -2590,6 +2590,30 @@ static int seccomp_restrict_sxid(scmp_filter_ctx seccomp, mode_t m) {
                         SCMP_A3(SCMP_CMP_MASKED_EQ, m, m));
         if (r < 0)
                 log_debug_errno(r, "Failed to add filter for openat: %m");
+        else
+                any = true;
+
+        r = sym_seccomp_rule_add_exact(
+                        seccomp,
+                        SCMP_ACT_ERRNO(EPERM),
+                        SCMP_SYS(open),
+                        2,
+                        SCMP_A1(SCMP_CMP_MASKED_EQ, O_TMPFILE & ~O_DIRECTORY, O_TMPFILE & ~O_DIRECTORY),
+                        SCMP_A2(SCMP_CMP_MASKED_EQ, m, m));
+        if (r < 0)
+                log_debug_errno(r, "Failed to add O_TMPFILE filter for open: %m");
+        else
+                any = true;
+
+        r = sym_seccomp_rule_add_exact(
+                        seccomp,
+                        SCMP_ACT_ERRNO(EPERM),
+                        SCMP_SYS(openat),
+                        2,
+                        SCMP_A2(SCMP_CMP_MASKED_EQ, O_TMPFILE & ~O_DIRECTORY, O_TMPFILE & ~O_DIRECTORY),
+                        SCMP_A3(SCMP_CMP_MASKED_EQ, m, m));
+        if (r < 0)
+                log_debug_errno(r, "Failed to add O_TMPFILE filter for openat: %m");
         else
                 any = true;
 
