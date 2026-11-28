@@ -109,6 +109,11 @@ int bpf_get_error_translated(const void *ptr);
  * it exists, not that it is registered as a kfunc for a given program type — callers must still handle
  * program load failure. */
 bool bpf_kernel_has_kfunc(const char *name);
+
+/* Returns the number of parameters of the named function in the given BTF, or -ENOENT if there is no such
+ * function. Arguments of LSM hooks are positional, and some hooks gained arguments over time, hence this
+ * tells apart which variant of a BPF LSM program matches the running kernel (checking "bpf_lsm_<hook>"). */
+int btf_func_nargs(const struct btf *btf, const char *name);
 #endif
 
 int dlopen_bpf(int log_level) _dlopen_loader_;

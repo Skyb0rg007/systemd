@@ -1446,7 +1446,7 @@ static int seccomp_add_mount_namespace_rules(scmp_filter_ctx seccomp, uint32_t a
         return 0;
 }
 
-int seccomp_restrict_namespaces(unsigned long retain) {
+int seccomp_restrict_namespaces(unsigned long retain, bool block_clone3) {
         uint32_t arch;
         int r;
 
@@ -1476,19 +1476,22 @@ int seccomp_restrict_namespaces(unsigned long retain) {
 
                 /* We cannot filter on individual flags to clone3(), and we need to disable the
                  * syscall altogether. ENOSYS is used instead of EPERM, so that glibc and other
-                 * users shall fall back to clone(), as if on an older kernel.
+                 * users shall fall back to clone(), as if on an older kernel. The caller can skip this
+                 * if clone3() is restricted otherwise, i.e. by the BPF LSM programs of PID 1.
                  *
                  * C.f. https://github.com/flatpak/flatpak/commit/a10f52a7565c549612c92b8e736a6698a53db330,
                  * https://github.com/moby/moby/issues/42680. */
 
-                r = sym_seccomp_rule_add_exact(
-                                seccomp,
-                                SCMP_ACT_ERRNO(ENOSYS),
-                                SCMP_SYS(clone3),
-                                /* arg_cnt= */ 0);
-                if (r < 0)
-                        log_debug_errno(r, "Failed to add clone3() rule for architecture %s, ignoring: %m",
-                                        seccomp_arch_to_string(arch));
+                if (block_clone3) {
+                        r = sym_seccomp_rule_add_exact(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(ENOSYS),
+                                        SCMP_SYS(clone3),
+                                        /* arg_cnt= */ 0);
+                        if (r < 0)
+                                log_debug_errno(r, "Failed to add clone3() rule for architecture %s, ignoring: %m",
+                                                seccomp_arch_to_string(arch));
+                }
 
                 if ((retain & NAMESPACE_FLAGS_ALL) == 0)
                         /* If every single kind of namespace shall be prohibited, then let's block the whole

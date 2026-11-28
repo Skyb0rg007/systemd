@@ -396,6 +396,12 @@ All tools:
   type as unsupported might not prevent loading some units of that type if they
   are referenced by other units of another supported type.
 
+* `$SYSTEMD_BPF_SANDBOX=0` — if set, the system service manager does not load
+  its BPF LSM programs that enforce `RestrictNamespaces=` and
+  `RestrictSUIDSGID=`, and uses seccomp filters for them instead. Programs
+  already loaded by a previous instance of the service manager stay attached
+  across reexecution, as running processes depend on them.
+
 * `$SYSTEMD_DEFAULT_MOUNT_RATE_LIMIT_BURST` — can be set to override the mount
   units burst rate limit for parsing `/proc/self/mountinfo`. On a system with
   few resources but many mounts the rate limit may be hit, which will cause the

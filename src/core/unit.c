@@ -5759,6 +5759,11 @@ int unit_set_exec_params(Unit *u, ExecParameters *p) {
                 p->bpf_restrict_fs_map_fd = fd;
         }
 
+        if (u->manager->bpf_sandbox_features != 0) {
+                p->bpf_sandbox_map_fd = u->manager->bpf_sandbox_map_fd;
+                p->bpf_sandbox_features = u->manager->bpf_sandbox_features;
+        }
+
         p->user_lookup_fd = u->manager->user_lookup_fds[1];
         p->handoff_timestamp_fd = u->manager->handoff_timestamp_fds[1];
         if (UNIT_VTABLE(u)->notify_pidref)

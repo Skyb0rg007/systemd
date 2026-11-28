@@ -4,6 +4,7 @@
 #include "sd-event.h"
 
 #include "bpf-restrict-fsaccess.h"
+#include "bpf-sandbox.h"
 #include "cgroup.h"
 #include "common-signal.h"
 #include "execute.h"
@@ -530,6 +531,12 @@ typedef struct Manager {
         bool restrict_fsaccess_personality_filter;
         /* The link FDs came from an older version, whose .bss layout differs from ours. */
         bool restrict_fsaccess_foreign_bss;
+
+        /* BPF LSM implementation of RestrictNamespaces= and RestrictSUIDSGID=. The link FDs keep the
+         * programs attached, sd-executor stores the policies of new processes in the map. */
+        int bpf_sandbox_link_fds[_BPF_SANDBOX_LINK_MAX];
+        int bpf_sandbox_map_fd;
+        BPFSandboxFeatures bpf_sandbox_features;
 
         /* Allow users to configure a rate limit for Reload()/Reexecute() operations */
         RateLimit reload_reexec_ratelimit;

@@ -345,7 +345,7 @@ TEST(restrict_namespace) {
 
         r = ASSERT_OK(pidref_safe_fork("(restrict-namespace)", FORK_LOG|FORK_WAIT, /* ret= */ NULL));
         if (r == 0) {
-                ASSERT_OK(seccomp_restrict_namespaces(CLONE_NEWNS|CLONE_NEWNET));
+                ASSERT_OK(seccomp_restrict_namespaces(CLONE_NEWNS|CLONE_NEWNET, /* block_clone3= */ true));
 
                 ASSERT_OK_ZERO_ERRNO(unshare(CLONE_NEWNS));
                 ASSERT_OK_ZERO_ERRNO(unshare(CLONE_NEWNET));
@@ -391,7 +391,7 @@ TEST(restrict_namespace) {
 
         r = ASSERT_OK(pidref_safe_fork("(restrict-namespace-mount-api)", FORK_LOG|FORK_WAIT, /* ret= */ NULL));
         if (r == 0) {
-                ASSERT_OK(seccomp_restrict_namespaces(CLONE_NEWNET));
+                ASSERT_OK(seccomp_restrict_namespaces(CLONE_NEWNET, /* block_clone3= */ true));
 
                 /* open_tree() without OPEN_TREE_CLONE does not create a mount namespace. */
                 safe_close(ASSERT_OK_ERRNO(open_tree(AT_FDCWD, "/", OPEN_TREE_CLOEXEC)));

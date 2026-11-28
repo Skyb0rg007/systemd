@@ -218,4 +218,29 @@ bool bpf_kernel_has_kfunc(const char *name) {
         log_debug("Kernel BTF %s %s().", id > 0 ? "provides" : "lacks", name);
         return id > 0;
 }
+
+int btf_func_nargs(const struct btf *btf, const char *name) {
+        const struct btf_type *func, *proto;
+        int id;
+
+        assert(btf);
+        assert(name);
+
+        if (!sym_btf__find_by_name_kind || !sym_btf__type_by_id)
+                return -EOPNOTSUPP;
+
+        id = sym_btf__find_by_name_kind(btf, name, BTF_KIND_FUNC);
+        if (id < 0)
+                return -ENOENT;
+
+        func = sym_btf__type_by_id(btf, id);
+        if (!func)
+                return -EBADMSG;
+
+        proto = sym_btf__type_by_id(btf, func->type);
+        if (!proto || !btf_is_func_proto(proto))
+                return -EBADMSG;
+
+        return btf_vlen(proto);
+}
 #endif

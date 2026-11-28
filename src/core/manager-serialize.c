@@ -5,6 +5,7 @@
 
 #include "alloc-util.h"
 #include "bpf-restrict-fsaccess.h"
+#include "bpf-sandbox.h"
 #include "dbus.h"
 #include "dynamic-user.h"
 #include "fd-util.h"
@@ -253,6 +254,10 @@ int manager_serialize(
         }
 
         r = bpf_restrict_fsaccess_serialize(m, f, fds);
+        if (r < 0)
+                return r;
+
+        r = bpf_sandbox_serialize(m, f, fds);
         if (r < 0)
                 return r;
 
@@ -865,6 +870,8 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
 
                 } else if (startswith(l, "restrict-fsaccess-"))
                         deserialize_restrict_fsaccess(m, l, fds);
+                else if (startswith(l, "bpf-sandbox-"))
+                        bpf_sandbox_deserialize_item(m, l, fds);
                 else if ((val = startswith(l, "dump-ratelimit=")))
                         deserialize_ratelimit(&m->dump_ratelimit, "dump-ratelimit", val);
                 else if ((val = startswith(l, "reload-reexec-ratelimit=")))

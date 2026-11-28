@@ -25,6 +25,7 @@
 #include "bitfield.h"
 #include "bpf-util.h"
 #include "bpf-restrict-fs.h"
+#include "bpf-sandbox.h"
 #include "btrfs-util.h"
 #include "capability-util.h"
 #include "cgroup-setup.h"
@@ -2193,12 +2194,17 @@ static int apply_restrict_realtime(const ExecContext *c, const ExecParameters *p
         return seccomp_restrict_realtime();
 }
 
-static int apply_restrict_suid_sgid(const ExecContext *c, const ExecParameters *p) {
+static int apply_restrict_suid_sgid(const ExecContext *c, const ExecParameters *p, BPFSandboxFeatures bpf) {
         assert(c);
         assert(p);
 
         if (!c->restrict_suid_sgid)
                 return 0;
+
+        if (FLAGS_SET(bpf, BPF_SANDBOX_SUID_SGID)) {
+                log_debug("RestrictSUIDSGID= is enforced by BPF LSM, not installing seccomp filter.");
+                return 0;
+        }
 
         if (skip_seccomp_unavailable("RestrictSUIDSGID="))
                 return 0;
@@ -2336,17 +2342,24 @@ static int apply_private_devices(const ExecContext *c, const ExecParameters *p) 
         return seccomp_load_syscall_filter_set(SCMP_ACT_ALLOW, syscall_filter_sets + SYSCALL_FILTER_SET_RAW_IO, SCMP_ACT_ERRNO(EPERM), /* log_missing= */ false);
 }
 
-static int apply_restrict_namespaces(const ExecContext *c, const ExecParameters *p) {
+static int apply_restrict_namespaces(const ExecContext *c, const ExecParameters *p, BPFSandboxFeatures bpf) {
         assert(c);
         assert(p);
 
         if (!exec_context_restrict_namespaces_set(c))
                 return 0;
 
+        if (FLAGS_SET(bpf, BPF_SANDBOX_NAMESPACES)) {
+                log_debug("RestrictNamespaces= is enforced by BPF LSM, not installing seccomp filter.");
+                return 0;
+        }
+
         if (skip_seccomp_unavailable("RestrictNamespaces="))
                 return 0;
 
-        return seccomp_restrict_namespaces(c->restrict_namespaces);
+        /* Without the namespace hooks the BPF LSM programs still check clone() and clone3(), hence only
+         * filter the system calls that pass namespace flags directly, which seccomp can filter exactly. */
+        return seccomp_restrict_namespaces(c->restrict_namespaces, /* block_clone3= */ !FLAGS_SET(bpf, BPF_SANDBOX_CLONE));
 }
 
 static int apply_lock_personality(const ExecContext *c, const ExecParameters *p) {
@@ -2378,6 +2391,41 @@ static int apply_lock_personality(const ExecContext *c, const ExecParameters *p)
 #endif
 
 #if HAVE_LIBBPF
+/* Stores the RestrictNamespaces= and RestrictSUIDSGID= policies in the map of PID 1's BPF LSM programs.
+ * Returns the features enforced that way, which then need no seccomp filter. On failure, the seccomp filters
+ * take over. */
+static BPFSandboxFeatures apply_bpf_sandbox(const ExecContext *c, ExecParameters *p) {
+        BPFSandboxFeatures applied = 0;
+        uint64_t namespaces_deny = 0;
+        int r;
+
+        assert(c);
+        assert(p);
+
+        if (p->bpf_sandbox_map_fd < 0)
+                return 0;
+
+        if (c->restrict_suid_sgid && FLAGS_SET(p->bpf_sandbox_features, BPF_SANDBOX_SUID_SGID))
+                applied |= BPF_SANDBOX_SUID_SGID;
+
+        if (exec_context_restrict_namespaces_set(c) && FLAGS_SET(p->bpf_sandbox_features, BPF_SANDBOX_CLONE)) {
+                namespaces_deny = NAMESPACE_FLAGS_ALL & ~c->restrict_namespaces;
+                applied |= p->bpf_sandbox_features & (BPF_SANDBOX_CLONE|BPF_SANDBOX_NAMESPACES);
+        }
+
+        if (applied != 0) {
+                r = bpf_sandbox_apply(p->bpf_sandbox_map_fd, namespaces_deny, FLAGS_SET(applied, BPF_SANDBOX_SUID_SGID));
+                if (r < 0) {
+                        log_warning_errno(r, "Failed to apply BPF LSM restrictions, falling back to seccomp: %m");
+                        applied = 0;
+                }
+        }
+
+        /* Don't leave the map to the service, it could change policies with it. */
+        p->bpf_sandbox_map_fd = safe_close(p->bpf_sandbox_map_fd);
+        return applied;
+}
+
 static int apply_restrict_filesystems(const ExecContext *c, const ExecParameters *p) {
         int r;
 
@@ -6124,6 +6172,12 @@ int exec_invoke(
                 *exit_status = EXIT_FDS;
                 return log_error_errno(r, "Failed to collect shifted fd: %m");
         }
+
+        r = add_shifted_fd(&keep_fds, &n_keep_fds, &params->bpf_sandbox_map_fd);
+        if (r < 0) {
+                *exit_status = EXIT_FDS;
+                return log_error_errno(r, "Failed to collect shifted fd: %m");
+        }
 #endif
 
         r = add_shifted_fd(&keep_fds, &n_keep_fds, &params->root_directory_fd);
@@ -7447,6 +7501,13 @@ int exec_invoke(
                         }
                 }
 
+                /* Must happen before the seccomp filters, which depend on what is enforced this way, and
+                 * which might deny the system calls needed for it. */
+                BPFSandboxFeatures bpf_sandbox = 0;
+#if HAVE_LIBBPF
+                bpf_sandbox = apply_bpf_sandbox(context, params);
+#endif
+
 #if HAVE_SECCOMP
                 r = apply_address_families(context, params);
                 if (r < 0) {
@@ -7466,13 +7527,13 @@ int exec_invoke(
                         return log_error_errno(r, "Failed to apply realtime restrictions: %m");
                 }
 
-                r = apply_restrict_suid_sgid(context, params);
+                r = apply_restrict_suid_sgid(context, params, bpf_sandbox);
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         return log_error_errno(r, "Failed to apply SUID/SGID restrictions: %m");
                 }
 
-                r = apply_restrict_namespaces(context, params);
+                r = apply_restrict_namespaces(context, params, bpf_sandbox);
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         return log_error_errno(r, "Failed to apply namespace restrictions: %m");

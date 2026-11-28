@@ -1213,6 +1213,17 @@ static int exec_parameters_serialize(const ExecParameters *p, const ExecContext 
                         return r;
         }
 
+        /* Only pass the map to processes that need it. */
+        if (c && (c->restrict_suid_sgid || exec_context_restrict_namespaces_set(c)) && p->bpf_sandbox_map_fd >= 0) {
+                r = serialize_fd(f, fds, "exec-parameters-bpf-sandbox-map-fd", p->bpf_sandbox_map_fd);
+                if (r < 0)
+                        return r;
+
+                r = serialize_item_format(f, "exec-parameters-bpf-sandbox-features", "%u", p->bpf_sandbox_features);
+                if (r < 0)
+                        return r;
+        }
+
         r = serialize_item(f, "exec-parameters-notify-socket", p->notify_socket);
         if (r < 0)
                 return r;
@@ -1488,6 +1499,18 @@ static int exec_parameters_deserialize(ExecParameters *p, FILE *f, FDSet *fds) {
                                 continue;
 
                         close_and_replace(p->bpf_restrict_fs_map_fd, fd);
+                } else if ((val = startswith(l, "exec-parameters-bpf-sandbox-map-fd="))) {
+                        int fd;
+
+                        fd = deserialize_fd(fds, val);
+                        if (fd < 0)
+                                continue;
+
+                        close_and_replace(p->bpf_sandbox_map_fd, fd);
+                } else if ((val = startswith(l, "exec-parameters-bpf-sandbox-features="))) {
+                        r = safe_atou(val, &p->bpf_sandbox_features);
+                        if (r < 0)
+                                return r;
                 } else if ((val = startswith(l, "exec-parameters-notify-socket="))) {
                         r = free_and_strdup(&p->notify_socket, val);
                         if (r < 0)

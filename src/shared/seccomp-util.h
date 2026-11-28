@@ -113,7 +113,7 @@ int seccomp_parse_syscall_filter(
                 const char *filename, unsigned line);
 
 int seccomp_restrict_archs(Set *archs);
-int seccomp_restrict_namespaces(unsigned long retain);
+int seccomp_restrict_namespaces(unsigned long retain, bool block_clone3);
 int seccomp_protect_sysctl(void);
 int seccomp_protect_syslog(void);
 int seccomp_restrict_address_families(Set *address_families, bool allow_list);

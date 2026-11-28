@@ -643,6 +643,13 @@ executables += [
                 ],
         },
         core_test_template + {
+                'sources' : files('test-bpf-sandbox.c'),
+                'dependencies' : [
+                        common_test_dependencies,
+                        libbpf_cflags,
+                ],
+        },
+        core_test_template + {
                 'sources' : files('test-bpf-restrict-fsaccess.c'),
                 'dependencies' : [
                         common_test_dependencies,

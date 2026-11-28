@@ -471,6 +471,11 @@ typedef struct ExecParameters {
 
         int bpf_restrict_fs_map_fd;
 
+        /* The BPF LSM implementation of RestrictNamespaces= and RestrictSUIDSGID=, borrowed from the
+         * manager. bpf_sandbox_features is a BPFSandboxFeatures bitmask. */
+        int bpf_sandbox_map_fd;
+        unsigned bpf_sandbox_features;
+
         /* Used for logging in the executor functions */
         char *unit_id;
         sd_id128_t invocation_id;
@@ -490,6 +495,7 @@ typedef struct ExecParameters {
                 .root_directory_fd      = -EBADF, \
                 .exec_fd                = -EBADF, \
                 .bpf_restrict_fs_map_fd = -EBADF, \
+                .bpf_sandbox_map_fd     = -EBADF, \
                 .user_lookup_fd         = -EBADF, \
                 .handoff_timestamp_fd   = -EBADF, \
                 .pidref_transport_fd    = -EBADF, \

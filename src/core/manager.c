@@ -22,6 +22,7 @@
 #include "boot-timestamps.h"
 #include "bpf-restrict-fs.h"
 #include "bpf-restrict-fsaccess.h"
+#include "bpf-sandbox.h"
 #include "build-path.h"
 #include "bus-common-errors.h"
 #include "bus-error.h"
@@ -970,9 +971,14 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                 .executor_fd = -EBADF,
 
                 .restrict_fsaccess_bss_map_fd = -EBADF,
+
+                .bpf_sandbox_map_fd = -EBADF,
         };
 
         FOREACH_ELEMENT(fd, m->restrict_fsaccess_link_fds)
+                *fd = -EBADF;
+
+        FOREACH_ELEMENT(fd, m->bpf_sandbox_link_fds)
                 *fd = -EBADF;
 
         unit_defaults_init(&m->defaults, runtime_scope);
@@ -1838,6 +1844,7 @@ Manager* manager_free(Manager *m) {
 #endif
         close_many(m->restrict_fsaccess_link_fds, ELEMENTSOF(m->restrict_fsaccess_link_fds));
         safe_close(m->restrict_fsaccess_bss_map_fd);
+        bpf_sandbox_done(m);
 
         safe_close(m->executor_fd);
 
@@ -2304,6 +2311,10 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds, Hashmap *named_
         r = bpf_restrict_fsaccess_setup(m);
         if (r < 0)
                 return r;
+
+        /* After deserialization too, so that we keep using the programs and the map of the previous PID 1,
+         * which hold the policies of the running processes. Without it we fall back to seccomp. */
+        (void) bpf_sandbox_setup(m);
 
         manager_ready(m);
 

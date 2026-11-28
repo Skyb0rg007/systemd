@@ -348,6 +348,10 @@ bpf_programs = [
                 'condition' : 'BPF_FRAMEWORK',
         },
         {
+                'source' : files('sandbox.bpf.c'),
+                'condition' : 'BPF_FRAMEWORK',
+        },
+        {
                 'source' : files('restrict-ifaces.bpf.c'),
                 'condition' : 'BPF_FRAMEWORK',
         },
