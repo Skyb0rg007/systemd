@@ -1107,6 +1107,7 @@ TEST(restrict_suid_sgid) {
         if (r == 0) {
                 char path[] = "/tmp/suidsgidXXXXXX", dir[] = "/tmp/suidsgiddirXXXXXX";
                 int fd = -EBADF, k = -EBADF;
+                bool tmpfile_supported;
                 const char *z;
 
                 fd = ASSERT_OK(mkostemp_safe(path));
@@ -1218,6 +1219,13 @@ TEST(restrict_suid_sgid) {
                 ASSERT_OK_ERRNO(mknodat(AT_FDCWD, z, S_IFREG | 0755, 0));
                 ASSERT_OK_ERRNO(unlink(z));
 
+                /* O_TMPFILE creates an unnamed file with the given mode, which can be linked into place. */
+                k = openat(AT_FDCWD, dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISUID);
+                if (k < 0)
+                        log_notice_errno(errno, "O_TMPFILE not supported on /tmp/, skipping its checks: %m");
+                tmpfile_supported = k >= 0;
+                k = safe_close(k);
+
                 ASSERT_OK(seccomp_restrict_suid_sgid());
 
                 ASSERT_ERROR_ERRNO(chmod(path, 0775 | S_ISUID), EPERM);
@@ -1260,6 +1268,20 @@ TEST(restrict_suid_sgid) {
                 k = openat(AT_FDCWD, z, O_CREAT|O_RDWR|O_CLOEXEC|O_EXCL, 0644);
                 k = safe_close(k);
                 ASSERT_OK_ERRNO(unlink(z));
+
+                if (tmpfile_supported) {
+                        ASSERT_ERROR_ERRNO(real_open(dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISUID), EPERM);
+                        ASSERT_ERROR_ERRNO(real_open(dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISGID), EPERM);
+                        ASSERT_ERROR_ERRNO(real_open(dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISUID | S_ISGID), EPERM);
+                        k = ASSERT_OK_ERRNO(real_open(dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644));
+                        k = safe_close(k);
+
+                        ASSERT_ERROR_ERRNO(openat(AT_FDCWD, dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISUID), EPERM);
+                        ASSERT_ERROR_ERRNO(openat(AT_FDCWD, dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISGID), EPERM);
+                        ASSERT_ERROR_ERRNO(openat(AT_FDCWD, dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644 | S_ISUID | S_ISGID), EPERM);
+                        k = ASSERT_OK_ERRNO(openat(AT_FDCWD, dir, O_TMPFILE|O_RDWR|O_CLOEXEC, 0644));
+                        k = safe_close(k);
+                }
 
                 ASSERT_ERROR_ERRNO(mkdir(z, 0755 | S_ISUID), EPERM);
                 ASSERT_ERROR_ERRNO(mkdir(z, 0755 | S_ISGID), EPERM);
